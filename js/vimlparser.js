@@ -71,6 +71,7 @@ var pat_vim2js = {
   "^\\h" : "^[A-Za-z_]",
   "^\\s" : "^\\s",
   "^\\s*\\\\" : "^\\s*\\\\",
+  "^\\s*[\"#]\\\\ " : "^\\s*[\"#]\\\\ ",
   "^[ \\t]$" : "^[ \\t]$",
   "^[A-Za-z]$" : "^[A-Za-z]$",
   "^[0-9A-Za-z]$" : "^[0-9A-Za-z]$",
@@ -5780,7 +5781,19 @@ StringReader.prototype.__init__ = function(lines) {
             col += viml_len(c);
             offset += viml_len(c);
         }
-        while (lnum + 1 < viml_len(lines) && viml_eqregh(lines[lnum + 1], "^\\s*\\\\")) {
+        while (TRUE) {
+            // Comment lines "\ and #\ may appear between continuation lines.
+            var next = lnum + 1;
+            while (next < viml_len(lines) && viml_eqregh(lines[next], "^\\s*[\"#]\\\\ ")) {
+                next += 1;
+            }
+            if (next >= viml_len(lines) || !viml_eqregh(lines[next], "^\\s*\\\\")) {
+                break;
+            }
+            while (lnum + 1 < next) {
+                offset += viml_len(lines[lnum + 1]) + 1;
+                lnum += 1;
+            }
             var skip = TRUE;
             var col = 0;
             var __c13 = viml_split(lines[lnum + 1], "\\zs");

@@ -73,6 +73,7 @@ pat_vim2py = {
     "^\\h": "^[A-Za-z_]",
     "^\\s": "^\\s",
     "^\\s*\\\\": "^\\s*\\\\",
+    "^\\s*[\"#]\\\\ ": "^\\s*[\"#]\\\\ ",
     "^[ \\t]$": "^[ \\t]$",
     "^[A-Za-z]$": "^[A-Za-z]$",
     "^[0-9A-Za-z]$": "^[0-9A-Za-z]$",
@@ -4688,7 +4689,16 @@ class StringReader:
                 viml_add(self.pos, [lnum + 1, col + 1, offset])
                 col += viml_len(c)
                 offset += viml_len(c)
-            while lnum + 1 < viml_len(lines) and viml_eqregh(lines[lnum + 1], "^\\s*\\\\"):
+            while TRUE:
+                # Comment lines "\ and #\ may appear between continuation lines.
+                next = lnum + 1
+                while next < viml_len(lines) and viml_eqregh(lines[next], "^\\s*[\"#]\\\\ "):
+                    next += 1
+                if next >= viml_len(lines) or not viml_eqregh(lines[next], "^\\s*\\\\"):
+                    break
+                while lnum + 1 < next:
+                    offset += viml_len(lines[lnum + 1]) + 1
+                    lnum += 1
                 skip = TRUE
                 col = 0
                 for c in viml_split(lines[lnum + 1], "\\zs"):

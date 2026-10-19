@@ -6370,7 +6370,19 @@ function! s:StringReader.__init__(lines) abort
       let col += len(c)
       let offset += len(c)
     endfor
-    while lnum + 1 < len(a:lines) && a:lines[lnum + 1] =~# '^\s*\\'
+    while s:TRUE
+      " Comment lines "\ and #\ may appear between continuation lines.
+      let next = lnum + 1
+      while next < len(a:lines) && a:lines[next] =~# '^\s*["#]\\ '
+        let next += 1
+      endwhile
+      if next >= len(a:lines) || a:lines[next] !~# '^\s*\\'
+        break
+      endif
+      while lnum + 1 < next
+        let offset += len(a:lines[lnum + 1]) + 1
+        let lnum += 1
+      endwhile
       let skip = s:TRUE
       let col = 0
       for c in split(a:lines[lnum + 1], '\zs')
