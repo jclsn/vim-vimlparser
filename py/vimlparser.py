@@ -805,6 +805,7 @@ class VimLParser:
             self.reader.skip_white()
             if self.reader.peekn(1) == ":":
                 colon = TRUE
+                self.reader.skip_white_and_colon()
             if colon:
                 self.parse_range()
             elif self.parse_vim9_statement():
@@ -1531,7 +1532,7 @@ class VimLParser:
     def parse_comment(self):
         npos = self.reader.getpos()
         c = self.reader.get()
-        if c != "\"" and not (self.isvim9() and c == "#"):
+        if c != "\"" and c != "#":
             raise VimLParserException(Err(viml_printf("unexpected character: %s", c), npos))
         node = Node(NODE_COMMENT)
         node.pos = npos
@@ -1548,7 +1549,8 @@ class VimLParser:
             self.reader.get()
         elif c == "|":
             self.reader.get()
-        elif c == "\"" and not self.isvim9():
+        elif c == "\"":
+            # Also in Vim9 script a double quote after a command starts a comment.
             self.parse_comment()
             self.reader.get()
         elif self.isvim9() and c == "#":

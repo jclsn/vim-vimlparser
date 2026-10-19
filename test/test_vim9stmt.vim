@@ -46,3 +46,6 @@ echo n
 {
   echo 'block'
 }
+silent! :%delete _
+if 1
+endif "}}}

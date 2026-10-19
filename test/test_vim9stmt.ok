@@ -43,3 +43,6 @@
 (excmd "1,2d")
 (block
   (echo 'block'))
+(excmd "silent! :%delete _")
+(if 1)
+;}}}

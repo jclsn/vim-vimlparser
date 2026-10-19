@@ -866,6 +866,7 @@ VimLParser.prototype.parse_one_cmd = function() {
         this.reader.skip_white();
         if (this.reader.peekn(1) == ":") {
             var colon = TRUE;
+            this.reader.skip_white_and_colon();
         }
         if (colon) {
             this.parse_range();
@@ -1861,7 +1862,7 @@ VimLParser.prototype.read_cmdarg = function() {
 VimLParser.prototype.parse_comment = function() {
     var npos = this.reader.getpos();
     var c = this.reader.get();
-    if (c != "\"" && !(this.isvim9() && c == "#")) {
+    if (c != "\"" && c != "#") {
         throw Err(viml_printf("unexpected character: %s", c), npos);
     }
     var node = Node(NODE_COMMENT);
@@ -1882,7 +1883,8 @@ VimLParser.prototype.parse_trail = function() {
     else if (c == "|") {
         this.reader.get();
     }
-    else if (c == "\"" && !this.isvim9()) {
+    else if (c == "\"") {
+        // Also in Vim9 script a double quote after a command starts a comment.
         this.parse_comment();
         this.reader.get();
     }

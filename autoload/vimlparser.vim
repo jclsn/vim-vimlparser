@@ -685,6 +685,7 @@ function! s:VimLParser.parse_one_cmd() abort
     call self.reader.skip_white()
     if self.reader.peekn(1) ==# ':'
       let colon = s:TRUE
+      call self.reader.skip_white_and_colon()
     endif
     if colon
       call self.parse_range()
@@ -1529,7 +1530,7 @@ endfunction
 function! s:VimLParser.parse_comment() abort
   let npos = self.reader.getpos()
   let c = self.reader.get()
-  if c !=# '"' && !(self.isvim9() && c ==# '#')
+  if c !=# '"' && c !=# '#'
     throw s:Err(printf('unexpected character: %s', c), npos)
   endif
   let node = s:Node(s:NODE_COMMENT)
@@ -1547,7 +1548,8 @@ function! s:VimLParser.parse_trail() abort
     call self.reader.get()
   elseif c ==# '|'
     call self.reader.get()
-  elseif c ==# '"' && !self.isvim9()
+  elseif c ==# '"'
+    " Also in Vim9 script a double quote after a command starts a comment.
     call self.parse_comment()
     call self.reader.get()
   elseif self.isvim9() && c ==# '#'
