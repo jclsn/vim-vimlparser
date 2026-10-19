@@ -349,6 +349,8 @@ var NODE_TYPE = 120;
 var NODE_PUBLIC = 121;
 var NODE_STATIC = 122;
 var NODE_ABSTRACT = 123;
+var NODE_FALSY = 124;
+var NODE_INTERPOLATION = 125;
 var TOKEN_EOF = 1;
 var TOKEN_EOL = 2;
 var TOKEN_SPACE = 3;
@@ -421,6 +423,7 @@ var TOKEN_HEREDOC = 69;
 var TOKEN_LSHIFT = 70;
 var TOKEN_RSHIFT = 71;
 var TOKEN_FATARROW = 72;
+var TOKEN_QUESTIONQUESTION = 73;
 var MAX_FUNC_ARGS = 20;
 // Binary operators that continue a Vim9 expression from the previous line.
 var VIM9_CONTINUATION_OPS = {"+":1, "-":1, "*":1, "/":1, "%":1, "..":1, "||":1, "&&":1, "??":1, "?":1, ":":1, "<<":1, ">>":1, "==":1, "==?":1, "==#":1, "!=":1, "!=?":1, "!=#":1, ">=":1, ">=?":1, ">=#":1, "<=":1, "<=?":1, "<=#":1, "=~":1, "=~?":1, "=~#":1, "!~":1, "!~?":1, "!~#":1, ">":1, ">?":1, ">#":1, "<":1, "<?":1, "<#":1};
@@ -648,6 +651,8 @@ function ExArg() {
 // PUBLIC .ea .body
 // STATIC .ea .body
 // ABSTRACT .ea .body
+// FALSY .left .right
+// INTERPOLATION .value
 // TUPLE .value
 // CAST .type_str .left
 function Node(type) {
@@ -3828,6 +3833,11 @@ ExprTokenizer.prototype.get2 = function() {
         s += r.read_bdigit();
         return this.token(TOKEN_NUMBER, s, pos);
     }
+    else if (c == "0" && (r.p(1) == "O" || r.p(1) == "o") && isodigit(r.p(2))) {
+        var s = r.getn(3);
+        s += r.read_odigit();
+        return this.token(TOKEN_NUMBER, s, pos);
+    }
     else if (c == "0" && (r.p(1) == "Z" || r.p(1) == "z") && r.p(2) != ".") {
         var s = r.getn(2);
         s += r.read_blob();
@@ -3835,6 +3845,10 @@ ExprTokenizer.prototype.get2 = function() {
     }
     else if (isdigit(c)) {
         var s = r.read_digit();
+        // Vim9 script allows a single quote between digits: 1'000'000
+        while (this.vim9 && r.p(0) == "'" && isdigit(r.p(1))) {
+            s += r.getn(1) + r.read_digit();
+        }
         if (r.p(0) == "." && isdigit(r.p(1))) {
             s += r.getn(1);
             s += r.read_digit();
@@ -4060,6 +4074,10 @@ ExprTokenizer.prototype.get2 = function() {
         r.seek_cur(1);
         return this.token(TOKEN_NOT, "!", pos);
     }
+    else if (c == "?" && r.p(1) == "?") {
+        r.seek_cur(2);
+        return this.token(TOKEN_QUESTIONQUESTION, "??", pos);
+    }
     else if (c == "?") {
         r.seek_cur(1);
         return this.token(TOKEN_QUESTION, "?", pos);
@@ -4264,11 +4282,19 @@ ExprParser.prototype.parse = function() {
 }
 
 // expr1: expr2 ? expr1 : expr1
+//        expr2 ?? expr1
 ExprParser.prototype.parse_expr1 = function() {
     var left = this.parse_expr2();
     var pos = this.reader.tell();
     var token = this.tokenizer.get();
-    if (token.type == TOKEN_QUESTION) {
+    if (token.type == TOKEN_QUESTIONQUESTION) {
+        var node = Node(NODE_FALSY);
+        node.pos = token.pos;
+        node.left = left;
+        node.right = this.parse_expr1();
+        var left = node;
+    }
+    else if (token.type == TOKEN_QUESTION) {
         var node = Node(NODE_TERNARY);
         node.pos = token.pos;
         node.cond = left;
@@ -5131,6 +5157,9 @@ ExprParser.prototype.parse_expr9 = function() {
         this.reader.seek_set(pos);
         var node = this.parse_identifier();
     }
+    else if (token.type == TOKEN_ENV && token.value == "$" && (this.reader.p(0) == "\"" || this.reader.p(0) == "'")) {
+        var node = this.parse_interpolation(token);
+    }
     else if (token.type == TOKEN_ENV) {
         var node = Node(NODE_ENV);
         node.pos = token.pos;
@@ -5143,6 +5172,65 @@ ExprParser.prototype.parse_expr9 = function() {
     }
     else {
         throw Err(viml_printf("unexpected token: %s", token.value), token.pos);
+    }
+    return node;
+}
+
+// Interpolated string: $"text {expr1} text" or $'text {expr1} text'
+// .value is a list of NODE_STRING parts, in the quotes of the string, and
+// expressions.
+ExprParser.prototype.parse_interpolation = function(token) {
+    var r = this.reader;
+    var node = Node(NODE_INTERPOLATION);
+    node.pos = token.pos;
+    node.value = [];
+    var quote = r.get();
+    var str = "";
+    var strpos = r.getpos();
+    while (TRUE) {
+        var c = r.p(0);
+        if (c == "<EOF>" || c == "<EOL>") {
+            throw Err("unexpected EOL", r.getpos());
+        }
+        else if (c == quote && quote == "'" && r.p(1) == "'") {
+            str += r.getn(2);
+        }
+        else if (c == quote) {
+            r.seek_cur(1);
+            break;
+        }
+        else if (c == "\\" && quote == "\"") {
+            str += r.getn(2);
+        }
+        else if (c == "{" && r.p(1) == "{" || c == "}" && r.p(1) == "}") {
+            str += r.getn(2);
+        }
+        else if (c == "{") {
+            if (str != "") {
+                var part = Node(NODE_STRING);
+                part.pos = strpos;
+                part.value = quote + str + quote;
+                viml_add(node.value, part);
+                var str = "";
+            }
+            r.seek_cur(1);
+            viml_add(node.value, this.parse_expr1());
+            r.skip_white();
+            if (r.p(0) != "}") {
+                throw Err(viml_printf("unexpected token: %s", r.p(0)), r.getpos());
+            }
+            r.seek_cur(1);
+            var strpos = r.getpos();
+        }
+        else {
+            str += r.getn(1);
+        }
+    }
+    if (str != "") {
+        var part = Node(NODE_STRING);
+        part.pos = strpos;
+        part.value = quote + str + quote;
+        viml_add(node.value, part);
     }
     return node;
 }
@@ -6273,6 +6361,12 @@ Compiler.prototype.compile = function(node) {
     else if (node.type == NODE_TUPLE) {
         return this.compile_tuple(node);
     }
+    else if (node.type == NODE_FALSY) {
+        return this.compile_falsy(node);
+    }
+    else if (node.type == NODE_INTERPOLATION) {
+        return this.compile_interpolation(node);
+    }
     else if (node.type == NODE_CAST) {
         return this.compile_cast(node);
     }
@@ -6866,6 +6960,20 @@ Compiler.prototype.compile_lambda = function(node) {
         viml_add(body, text);
     }
     return viml_printf("(lambda (%s) %s)", viml_join(rlist, " "), viml_join(body, " "));
+}
+
+Compiler.prototype.compile_falsy = function(node) {
+    return viml_printf("(?? %s %s)", this.compile(node.left), this.compile(node.right));
+}
+
+Compiler.prototype.compile_interpolation = function(node) {
+    var value = node.value.map((function(vval) { return this.compile(vval); }).bind(this));
+    if (viml_empty(value)) {
+        return "(interpolation)";
+    }
+    else {
+        return viml_printf("(interpolation %s)", viml_join(value, " "));
+    }
 }
 
 Compiler.prototype.compile_tuple = function(node) {

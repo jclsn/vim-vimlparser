@@ -336,6 +336,8 @@ NODE_TYPE = 120
 NODE_PUBLIC = 121
 NODE_STATIC = 122
 NODE_ABSTRACT = 123
+NODE_FALSY = 124
+NODE_INTERPOLATION = 125
 TOKEN_EOF = 1
 TOKEN_EOL = 2
 TOKEN_SPACE = 3
@@ -408,6 +410,7 @@ TOKEN_HEREDOC = 69
 TOKEN_LSHIFT = 70
 TOKEN_RSHIFT = 71
 TOKEN_FATARROW = 72
+TOKEN_QUESTIONQUESTION = 73
 MAX_FUNC_ARGS = 20
 # Binary operators that continue a Vim9 expression from the previous line.
 VIM9_CONTINUATION_OPS = AttributeDict({"+": 1, "-": 1, "*": 1, "/": 1, "%": 1, "..": 1, "||": 1, "&&": 1, "??": 1, "?": 1, ":": 1, "<<": 1, ">>": 1, "==": 1, "==?": 1, "==#": 1, "!=": 1, "!=?": 1, "!=#": 1, ">=": 1, ">=?": 1, ">=#": 1, "<=": 1, "<=?": 1, "<=#": 1, "=~": 1, "=~?": 1, "=~#": 1, "!~": 1, "!~?": 1, "!~#": 1, ">": 1, ">?": 1, ">#": 1, "<": 1, "<?": 1, "<#": 1})
@@ -637,6 +640,8 @@ def ExArg():
 # PUBLIC .ea .body
 # STATIC .ea .body
 # ABSTRACT .ea .body
+# FALSY .left .right
+# INTERPOLATION .value
 # TUPLE .value
 # CAST .type_str .left
 def Node(type):
@@ -3115,12 +3120,19 @@ class ExprTokenizer:
             s = r.getn(3)
             s += r.read_bdigit()
             return self.token(TOKEN_NUMBER, s, pos)
+        elif c == "0" and (r.p(1) == "O" or r.p(1) == "o") and isodigit(r.p(2)):
+            s = r.getn(3)
+            s += r.read_odigit()
+            return self.token(TOKEN_NUMBER, s, pos)
         elif c == "0" and (r.p(1) == "Z" or r.p(1) == "z") and r.p(2) != ".":
             s = r.getn(2)
             s += r.read_blob()
             return self.token(TOKEN_BLOB, s, pos)
         elif isdigit(c):
             s = r.read_digit()
+            # Vim9 script allows a single quote between digits: 1'000'000
+            while self.vim9 and r.p(0) == "'" and isdigit(r.p(1)):
+                s += r.getn(1) + r.read_digit()
             if r.p(0) == "." and isdigit(r.p(1)):
                 s += r.getn(1)
                 s += r.read_digit()
@@ -3283,6 +3295,9 @@ class ExprTokenizer:
         elif c == "!":
             r.seek_cur(1)
             return self.token(TOKEN_NOT, "!", pos)
+        elif c == "?" and r.p(1) == "?":
+            r.seek_cur(2)
+            return self.token(TOKEN_QUESTIONQUESTION, "??", pos)
         elif c == "?":
             r.seek_cur(1)
             return self.token(TOKEN_QUESTION, "?", pos)
@@ -3439,11 +3454,18 @@ class ExprParser:
         return self.parse_expr1()
 
     # expr1: expr2 ? expr1 : expr1
+    #        expr2 ?? expr1
     def parse_expr1(self):
         left = self.parse_expr2()
         pos = self.reader.tell()
         token = self.tokenizer.get()
-        if token.type == TOKEN_QUESTION:
+        if token.type == TOKEN_QUESTIONQUESTION:
+            node = Node(NODE_FALSY)
+            node.pos = token.pos
+            node.left = left
+            node.right = self.parse_expr1()
+            left = node
+        elif token.type == TOKEN_QUESTION:
             node = Node(NODE_TERNARY)
             node.pos = token.pos
             node.cond = left
@@ -4156,6 +4178,8 @@ class ExprParser:
         elif token.type == TOKEN_IS or token.type == TOKEN_ISCS or token.type == TOKEN_ISNOT or token.type == TOKEN_ISNOTCS:
             self.reader.seek_set(pos)
             node = self.parse_identifier()
+        elif token.type == TOKEN_ENV and token.value == "$" and (self.reader.p(0) == "\"" or self.reader.p(0) == "'"):
+            node = self.parse_interpolation(token)
         elif token.type == TOKEN_ENV:
             node = Node(NODE_ENV)
             node.pos = token.pos
@@ -4166,6 +4190,53 @@ class ExprParser:
             node.value = token.value
         else:
             raise VimLParserException(Err(viml_printf("unexpected token: %s", token.value), token.pos))
+        return node
+
+    # Interpolated string: $"text {expr1} text" or $'text {expr1} text'
+    # .value is a list of NODE_STRING parts, in the quotes of the string, and
+    # expressions.
+    def parse_interpolation(self, token):
+        r = self.reader
+        node = Node(NODE_INTERPOLATION)
+        node.pos = token.pos
+        node.value = []
+        quote = r.get()
+        str = ""
+        strpos = r.getpos()
+        while TRUE:
+            c = r.p(0)
+            if c == "<EOF>" or c == "<EOL>":
+                raise VimLParserException(Err("unexpected EOL", r.getpos()))
+            elif c == quote and quote == "'" and r.p(1) == "'":
+                str += r.getn(2)
+            elif c == quote:
+                r.seek_cur(1)
+                break
+            elif c == "\\" and quote == "\"":
+                str += r.getn(2)
+            elif c == "{" and r.p(1) == "{" or c == "}" and r.p(1) == "}":
+                str += r.getn(2)
+            elif c == "{":
+                if str != "":
+                    part = Node(NODE_STRING)
+                    part.pos = strpos
+                    part.value = quote + str + quote
+                    viml_add(node.value, part)
+                    str = ""
+                r.seek_cur(1)
+                viml_add(node.value, self.parse_expr1())
+                r.skip_white()
+                if r.p(0) != "}":
+                    raise VimLParserException(Err(viml_printf("unexpected token: %s", r.p(0)), r.getpos()))
+                r.seek_cur(1)
+                strpos = r.getpos()
+            else:
+                str += r.getn(1)
+        if str != "":
+            part = Node(NODE_STRING)
+            part.pos = strpos
+            part.value = quote + str + quote
+            viml_add(node.value, part)
         return node
 
     # Vim9 lambda, tuple or expression in parentheses, after the "(":
@@ -5027,6 +5098,10 @@ class Compiler:
             return NIL
         elif node.type == NODE_TUPLE:
             return self.compile_tuple(node)
+        elif node.type == NODE_FALSY:
+            return self.compile_falsy(node)
+        elif node.type == NODE_INTERPOLATION:
+            return self.compile_interpolation(node)
         elif node.type == NODE_CAST:
             return self.compile_cast(node)
         else:
@@ -5467,6 +5542,16 @@ class Compiler:
                     text += c
             viml_add(body, text)
         return viml_printf("(lambda (%s) %s)", viml_join(rlist, " "), viml_join(body, " "))
+
+    def compile_falsy(self, node):
+        return viml_printf("(?? %s %s)", self.compile(node.left), self.compile(node.right))
+
+    def compile_interpolation(self, node):
+        value = [self.compile(vval) for vval in node.value]
+        if viml_empty(value):
+            return "(interpolation)"
+        else:
+            return viml_printf("(interpolation %s)", viml_join(value, " "))
 
     def compile_tuple(self, node):
         value = [self.compile(vval) for vval in node.value]

@@ -168,6 +168,8 @@ let s:NODE_TYPE = 120
 let s:NODE_PUBLIC = 121
 let s:NODE_STATIC = 122
 let s:NODE_ABSTRACT = 123
+let s:NODE_FALSY = 124
+let s:NODE_INTERPOLATION = 125
 
 let s:TOKEN_EOF = 1
 let s:TOKEN_EOL = 2
@@ -241,6 +243,7 @@ let s:TOKEN_HEREDOC = 69
 let s:TOKEN_LSHIFT = 70
 let s:TOKEN_RSHIFT = 71
 let s:TOKEN_FATARROW = 72
+let s:TOKEN_QUESTIONQUESTION = 73
 
 let s:MAX_FUNC_ARGS = 20
 
@@ -471,6 +474,8 @@ endfunction
 " PUBLIC .ea .body
 " STATIC .ea .body
 " ABSTRACT .ea .body
+" FALSY .left .right
+" INTERPOLATION .value
 " TUPLE .value
 " CAST .type_str .left
 function! s:Node(type) abort
@@ -4607,12 +4612,20 @@ function! s:ExprTokenizer.get2() abort
     let s = r.getn(3)
     let s .= r.read_bdigit()
     return self.token(s:TOKEN_NUMBER, s, pos)
+  elseif c ==# '0' && (r.p(1) ==# 'O' || r.p(1) ==# 'o') && s:isodigit(r.p(2))
+    let s = r.getn(3)
+    let s .= r.read_odigit()
+    return self.token(s:TOKEN_NUMBER, s, pos)
   elseif c ==# '0' && (r.p(1) ==# 'Z' || r.p(1) ==# 'z') && r.p(2) !=# '.'
     let s = r.getn(2)
     let s .= r.read_blob()
     return self.token(s:TOKEN_BLOB, s, pos)
   elseif s:isdigit(c)
     let s = r.read_digit()
+    " Vim9 script allows a single quote between digits: 1'000'000
+    while self.vim9 && r.p(0) ==# "'" && s:isdigit(r.p(1))
+      let s .= r.getn(1) . r.read_digit()
+    endwhile
     if r.p(0) ==# '.' && s:isdigit(r.p(1))
       let s .= r.getn(1)
       let s .= r.read_digit()
@@ -4788,6 +4801,9 @@ function! s:ExprTokenizer.get2() abort
   elseif c ==# '!'
     call r.seek_cur(1)
     return self.token(s:TOKEN_NOT, '!', pos)
+  elseif c ==# '?' && r.p(1) ==# '?'
+    call r.seek_cur(2)
+    return self.token(s:TOKEN_QUESTIONQUESTION, '??', pos)
   elseif c ==# '?'
     call r.seek_cur(1)
     return self.token(s:TOKEN_QUESTION, '?', pos)
@@ -4971,11 +4987,18 @@ function! s:ExprParser.parse() abort
 endfunction
 
 " expr1: expr2 ? expr1 : expr1
+"        expr2 ?? expr1
 function! s:ExprParser.parse_expr1() abort
   let left = self.parse_expr2()
   let pos = self.reader.tell()
   let token = self.tokenizer.get()
-  if token.type ==# s:TOKEN_QUESTION
+  if token.type ==# s:TOKEN_QUESTIONQUESTION
+    let node = s:Node(s:NODE_FALSY)
+    let node.pos = token.pos
+    let node.left = left
+    let node.right = self.parse_expr1()
+    let left = node
+  elseif token.type ==# s:TOKEN_QUESTION
     let node = s:Node(s:NODE_TERNARY)
     let node.pos = token.pos
     let node.cond = left
@@ -5752,6 +5775,8 @@ function! s:ExprParser.parse_expr9() abort
   elseif token.type ==# s:TOKEN_IS || token.type ==# s:TOKEN_ISCS || token.type ==# s:TOKEN_ISNOT || token.type ==# s:TOKEN_ISNOTCS
     call self.reader.seek_set(pos)
     let node = self.parse_identifier()
+  elseif token.type ==# s:TOKEN_ENV && token.value ==# '$' && (self.reader.p(0) ==# '"' || self.reader.p(0) ==# "'")
+    let node = self.parse_interpolation(token)
   elseif token.type ==# s:TOKEN_ENV
     let node = s:Node(s:NODE_ENV)
     let node.pos = token.pos
@@ -5762,6 +5787,59 @@ function! s:ExprParser.parse_expr9() abort
     let node.value = token.value
   else
     throw s:Err(printf('unexpected token: %s', token.value), token.pos)
+  endif
+  return node
+endfunction
+
+" Interpolated string: $"text {expr1} text" or $'text {expr1} text'
+" .value is a list of NODE_STRING parts, in the quotes of the string, and
+" expressions.
+function! s:ExprParser.parse_interpolation(token) abort
+  let r = self.reader
+  let node = s:Node(s:NODE_INTERPOLATION)
+  let node.pos = a:token.pos
+  let node.value = []
+  let quote = r.get()
+  let str = ''
+  let strpos = r.getpos()
+  while s:TRUE
+    let c = r.p(0)
+    if c ==# '<EOF>' || c ==# '<EOL>'
+      throw s:Err('unexpected EOL', r.getpos())
+    elseif c ==# quote && quote ==# "'" && r.p(1) ==# "'"
+      let str .= r.getn(2)
+    elseif c ==# quote
+      call r.seek_cur(1)
+      break
+    elseif c ==# '\' && quote ==# '"'
+      let str .= r.getn(2)
+    elseif (c ==# '{' && r.p(1) ==# '{') || (c ==# '}' && r.p(1) ==# '}')
+      let str .= r.getn(2)
+    elseif c ==# '{'
+      if str !=# ''
+        let part = s:Node(s:NODE_STRING)
+        let part.pos = strpos
+        let part.value = quote . str . quote
+        call add(node.value, part)
+        let str = ''
+      endif
+      call r.seek_cur(1)
+      call add(node.value, self.parse_expr1())
+      call r.skip_white()
+      if r.p(0) !=# '}'
+        throw s:Err(printf('unexpected token: %s', r.p(0)), r.getpos())
+      endif
+      call r.seek_cur(1)
+      let strpos = r.getpos()
+    else
+      let str .= r.getn(1)
+    endif
+  endwhile
+  if str !=# ''
+    let part = s:Node(s:NODE_STRING)
+    let part.pos = strpos
+    let part.value = quote . str . quote
+    call add(node.value, part)
   endif
   return node
 endfunction
@@ -6762,6 +6840,10 @@ function! s:Compiler.compile(node) abort
     return s:NIL
   elseif a:node.type ==# s:NODE_TUPLE
     return self.compile_tuple(a:node)
+  elseif a:node.type ==# s:NODE_FALSY
+    return self.compile_falsy(a:node)
+  elseif a:node.type ==# s:NODE_INTERPOLATION
+    return self.compile_interpolation(a:node)
   elseif a:node.type ==# s:NODE_CAST
     return self.compile_cast(a:node)
   else
@@ -7327,6 +7409,19 @@ function! s:Compiler.compile_lambda(node) abort
     call add(body, text)
   endfor
   return printf('(lambda (%s) %s)', join(rlist, ' '), join(body, ' '))
+endfunction
+
+function! s:Compiler.compile_falsy(node) abort
+  return printf('(?? %s %s)', self.compile(a:node.left), self.compile(a:node.right))
+endfunction
+
+function! s:Compiler.compile_interpolation(node) abort
+  let value = map(a:node.value, 'self.compile(v:val)')
+  if empty(value)
+    return '(interpolation)'
+  else
+    return printf('(interpolation %s)', join(value, ' '))
+  endif
 endfunction
 
 function! s:Compiler.compile_tuple(node) abort
