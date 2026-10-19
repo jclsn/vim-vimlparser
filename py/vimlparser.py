@@ -603,7 +603,7 @@ def ExArg():
 # FINAL .ea .op .left .list .rest .right .type_str
 # EXPORT .ea .body
 # IMPORT .ea .str .left
-# VIM9SCRIPT .ea
+# VIM9SCRIPT .ea .noclear
 def Node(type):
     return AttributeDict({"type": type})
 
@@ -621,6 +621,16 @@ class VimLParser:
             self.neovim = 0
         self.find_command_cache = AttributeDict({})
         self.vim9script = 0
+
+    # Vim9 syntax applies inside :def functions, and in a Vim9 script outside of
+    # legacy :function bodies.
+    def isvim9(self):
+        for node in self.context:
+            if node.type == NODE_DEF:
+                return TRUE
+            elif node.type == NODE_FUNCTION:
+                return FALSE
+        return self.vim9script
 
     def push_context(self, node):
         viml_insert(self.context, node)
@@ -691,11 +701,11 @@ class VimLParser:
         if self.reader.peekn(1) == "":
             self.reader.get()
             return
-        if self.reader.peekn(1) == "\"":
+        if self.reader.peekn(1) == "\"" and not self.isvim9():
             self.parse_comment()
             self.reader.get()
             return
-        if self.vim9script and self.reader.peekn(1) == "#":
+        if self.isvim9() and self.reader.peekn(1) == "#":
             self.parse_comment()
             self.reader.get()
             return
@@ -888,7 +898,7 @@ class VimLParser:
     def parse_command(self):
         self.reader.skip_white_and_colon()
         self.ea.cmdpos = self.reader.getpos()
-        if self.reader.peekn(1) == "" or self.reader.peekn(1) == "\"" or self.vim9script and self.reader.peekn(1) == "#":
+        if self.reader.peekn(1) == "" or self.ends_excmds(self.reader.peekn(1)):
             if not viml_empty(self.ea.modifiers) or not viml_empty(self.ea.range):
                 self.parse_cmd_modifier_range()
             return
@@ -896,6 +906,12 @@ class VimLParser:
         if self.ea.cmd is NIL:
             self.reader.setpos(self.ea.cmdpos)
             raise VimLParserException(Err(viml_printf("E492: Not an editor command: %s", self.reader.peekline()), self.ea.cmdpos))
+        # In legacy script :final is an abbreviation of :finally.
+        if self.ea.cmd.name == "final" and not self.isvim9():
+            for x in self.builtin_commands:
+                if x.name == "finally":
+                    self.ea.cmd = x
+                    break
         if self.reader.peekn(1) == "!" and self.ea.cmd.name != "substitute" and self.ea.cmd.name != "smagic" and self.ea.cmd.name != "snomagic":
             self.reader.getn(1)
             self.ea.forceit = TRUE
@@ -1172,7 +1188,7 @@ class VimLParser:
     def parse_comment(self):
         npos = self.reader.getpos()
         c = self.reader.get()
-        if c != "\"" and not (self.vim9script and c == "#"):
+        if c != "\"" and not (self.isvim9() and c == "#"):
             raise VimLParserException(Err(viml_printf("unexpected character: %s", c), npos))
         node = Node(NODE_COMMENT)
         node.pos = npos
@@ -1189,10 +1205,10 @@ class VimLParser:
             self.reader.get()
         elif c == "|":
             self.reader.get()
-        elif c == "\"":
+        elif c == "\"" and not self.isvim9():
             self.parse_comment()
             self.reader.get()
-        elif self.vim9script and c == "#":
+        elif self.isvim9() and c == "#":
             self.parse_comment()
             self.reader.get()
         else:
@@ -1230,6 +1246,7 @@ class VimLParser:
     def separate_nextcmd(self):
         if self.ea.cmd.name == "vimgrep" or self.ea.cmd.name == "vimgrepadd" or self.ea.cmd.name == "lvimgrep" or self.ea.cmd.name == "lvimgrepadd":
             self.skip_vimgrep_pat()
+        vim9 = self.isvim9()
         pc = ""
         end = self.reader.getpos()
         nospend = end
@@ -1256,7 +1273,7 @@ class VimLParser:
                 if c != "`":
                     raise VimLParserException(Err(viml_printf("unexpected character: %s", c), self.reader.getpos()))
                 self.reader.getn(1)
-            elif c == "|" or c == "\n" or c == "\"" and not viml_eqregh(self.ea.cmd.flags, "\\<NOTRLCOM\\>") and (self.ea.cmd.name != "@" and self.ea.cmd.name != "*" or self.reader.getpos() != self.ea.argpos) and (self.ea.cmd.name != "redir" or self.reader.getpos().i != self.ea.argpos.i + 1 or pc != "@") or self.vim9script and c == "#" and iswhite(pc) and not viml_eqregh(self.ea.cmd.flags, "\\<NOTRLCOM\\>"):
+            elif c == "|" or c == "\n" or c == "\"" and not vim9 and not viml_eqregh(self.ea.cmd.flags, "\\<NOTRLCOM\\>") and (self.ea.cmd.name != "@" and self.ea.cmd.name != "*" or self.reader.getpos() != self.ea.argpos) and (self.ea.cmd.name != "redir" or self.reader.getpos().i != self.ea.argpos.i + 1 or pc != "@") or vim9 and c == "#" and iswhite(pc) and not viml_eqregh(self.ea.cmd.flags, "\\<NOTRLCOM\\>"):
                 has_cpo_bar = FALSE
                 # &cpoptions =~ 'b'
                 if (not has_cpo_bar or not viml_eqregh(self.ea.cmd.flags, "\\<USECTRLV\\>")) and pc == "\\":
@@ -1667,10 +1684,16 @@ class VimLParser:
         self.add_node(node)
 
     def parse_cmd_vim9script(self):
-        self.reader.skip_white()
         node = Node(NODE_VIM9SCRIPT)
         node.pos = self.ea.cmdpos
         node.ea = self.ea
+        node.noclear = FALSE
+        self.reader.skip_white()
+        pos = self.reader.tell()
+        if self.reader.read_alpha() == "noclear":
+            node.noclear = TRUE
+        else:
+            self.reader.seek_set(pos)
         self.vim9script = 1
         self.add_node(node)
 
@@ -2381,8 +2404,11 @@ class VimLParser:
         return lhs
 
     def ends_excmds(self, c):
-        if self.vim9script and c == "#":
-            return 1
+        if self.isvim9():
+            if c == "#":
+                return 1
+            elif c == "\"":
+                return 0
         return c == "" or c == "|" or c == "\"" or c == "<EOF>" or c == "<EOL>"
 
     # FIXME: validate argument
@@ -4550,7 +4576,10 @@ class Compiler:
         return viml_printf("(heredoc %s %s %s)", rlist, op, body)
 
     def compile_vim9script(self, node):
-        self.out("(vim9script)")
+        if node.noclear:
+            self.out("(vim9script noclear)")
+        else:
+            self.out("(vim9script)")
 
     def compile_def(self, node):
         left = self.compile(node.left)

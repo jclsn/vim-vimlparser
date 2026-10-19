@@ -436,7 +436,7 @@ endfunction
 " FINAL .ea .op .left .list .rest .right .type_str
 " EXPORT .ea .body
 " IMPORT .ea .str .left
-" VIM9SCRIPT .ea
+" VIM9SCRIPT .ea .noclear
 function! s:Node(type) abort
   return {'type': a:type}
 endfunction
@@ -462,6 +462,19 @@ function! s:VimLParser.__init__(...) abort
 
   let self.find_command_cache = {}
   let self.vim9script = 0
+endfunction
+
+" Vim9 syntax applies inside :def functions, and in a Vim9 script outside of
+" legacy :function bodies.
+function! s:VimLParser.isvim9() abort
+  for node in self.context
+    if node.type ==# s:NODE_DEF
+      return s:TRUE
+    elseif node.type ==# s:NODE_FUNCTION
+      return s:FALSE
+    endif
+  endfor
+  return self.vim9script
 endfunction
 
 function! s:VimLParser.push_context(node) abort
@@ -556,12 +569,12 @@ function! s:VimLParser.parse_one_cmd() abort
     call self.reader.get()
     return
   endif
-  if self.reader.peekn(1) ==# '"'
+  if self.reader.peekn(1) ==# '"' && !self.isvim9()
     call self.parse_comment()
     call self.reader.get()
     return
   endif
-  if self.vim9script && self.reader.peekn(1) ==# '#'
+  if self.isvim9() && self.reader.peekn(1) ==# '#'
     call self.parse_comment()
     call self.reader.get()
     return
@@ -772,7 +785,7 @@ function! s:VimLParser.parse_command() abort
 
   let self.ea.cmdpos = self.reader.getpos()
 
-  if self.reader.peekn(1) ==# '' || self.reader.peekn(1) ==# '"' || (self.vim9script && self.reader.peekn(1) ==# '#')
+  if self.reader.peekn(1) ==# '' || self.ends_excmds(self.reader.peekn(1))
     if !empty(self.ea.modifiers) || !empty(self.ea.range)
       call self.parse_cmd_modifier_range()
     endif
@@ -784,6 +797,16 @@ function! s:VimLParser.parse_command() abort
   if self.ea.cmd is# s:NIL
     call self.reader.setpos(self.ea.cmdpos)
     throw s:Err(printf('E492: Not an editor command: %s', self.reader.peekline()), self.ea.cmdpos)
+  endif
+
+  " In legacy script :final is an abbreviation of :finally.
+  if self.ea.cmd.name ==# 'final' && !self.isvim9()
+    for x in self.builtin_commands
+      if x.name ==# 'finally'
+        let self.ea.cmd = x
+        break
+      endif
+    endfor
   endif
 
   if self.reader.peekn(1) ==# '!' && self.ea.cmd.name !=# 'substitute' && self.ea.cmd.name !=# 'smagic' && self.ea.cmd.name !=# 'snomagic'
@@ -1122,7 +1145,7 @@ endfunction
 function! s:VimLParser.parse_comment() abort
   let npos = self.reader.getpos()
   let c = self.reader.get()
-  if c !=# '"' && !(self.vim9script && c ==# '#')
+  if c !=# '"' && !(self.isvim9() && c ==# '#')
     throw s:Err(printf('unexpected character: %s', c), npos)
   endif
   let node = s:Node(s:NODE_COMMENT)
@@ -1140,10 +1163,10 @@ function! s:VimLParser.parse_trail() abort
     call self.reader.get()
   elseif c ==# '|'
     call self.reader.get()
-  elseif c ==# '"'
+  elseif c ==# '"' && !self.isvim9()
     call self.parse_comment()
     call self.reader.get()
-  elseif self.vim9script && c ==# '#'
+  elseif self.isvim9() && c ==# '#'
     call self.parse_comment()
     call self.reader.get()
   else
@@ -1191,6 +1214,7 @@ function! s:VimLParser.separate_nextcmd() abort
   if self.ea.cmd.name ==# 'vimgrep' || self.ea.cmd.name ==# 'vimgrepadd' || self.ea.cmd.name ==# 'lvimgrep' || self.ea.cmd.name ==# 'lvimgrepadd'
     call self.skip_vimgrep_pat()
   endif
+  let vim9 = self.isvim9()
   let pc = ''
   let end = self.reader.getpos()
   let nospend = end
@@ -1220,12 +1244,12 @@ function! s:VimLParser.separate_nextcmd() abort
       endif
       call self.reader.getn(1)
     elseif c ==# '|' || c ==# "\n" ||
-          \ (c ==# '"' && self.ea.cmd.flags !~# '\<NOTRLCOM\>'
+          \ (c ==# '"' && !vim9 && self.ea.cmd.flags !~# '\<NOTRLCOM\>'
           \   && ((self.ea.cmd.name !=# '@' && self.ea.cmd.name !=# '*')
           \       || self.reader.getpos() !=# self.ea.argpos)
           \   && (self.ea.cmd.name !=# 'redir'
           \       || self.reader.getpos().i !=# self.ea.argpos.i + 1 || pc !=# '@'))
-          \ || (self.vim9script && c ==# '#' && s:iswhite(pc) && self.ea.cmd.flags !~# '\<NOTRLCOM\>')
+          \ || (vim9 && c ==# '#' && s:iswhite(pc) && self.ea.cmd.flags !~# '\<NOTRLCOM\>')
       let has_cpo_bar = s:FALSE " &cpoptions =~ 'b'
       if (!has_cpo_bar || self.ea.cmd.flags !~# '\<USECTRLV\>') && pc ==# '\'
         call self.reader.get()
@@ -1730,10 +1754,17 @@ function! s:VimLParser.parse_cmd_const() abort
 endfunction
 
 function! s:VimLParser.parse_cmd_vim9script() abort
-  call self.reader.skip_white()
   let node = s:Node(s:NODE_VIM9SCRIPT)
   let node.pos = self.ea.cmdpos
   let node.ea = self.ea
+  let node.noclear = s:FALSE
+  call self.reader.skip_white()
+  let pos = self.reader.tell()
+  if self.reader.read_alpha() ==# 'noclear'
+    let node.noclear = s:TRUE
+  else
+    call self.reader.seek_set(pos)
+  endif
   let self.vim9script = 1
   call self.add_node(node)
 endfunction
@@ -2587,8 +2618,12 @@ function! s:VimLParser.parse_constlhs() abort
 endfunction
 
 function! s:VimLParser.ends_excmds(c) abort
-  if self.vim9script && a:c ==# '#'
-    return 1
+  if self.isvim9()
+    if a:c ==# '#'
+      return 1
+    elseif a:c ==# '"'
+      return 0
+    endif
   endif
   return a:c ==# '' || a:c ==# '|' || a:c ==# '"' || a:c ==# '<EOF>' || a:c ==# '<EOL>'
 endfunction
@@ -6252,7 +6287,11 @@ function! s:Compiler.compile_heredoc(node) abort
 endfunction
 
 function! s:Compiler.compile_vim9script(node) abort
-  call self.out('(vim9script)')
+  if a:node.noclear
+    call self.out('(vim9script noclear)')
+  else
+    call self.out('(vim9script)')
+  endif
 endfunction
 
 function! s:Compiler.compile_def(node) abort

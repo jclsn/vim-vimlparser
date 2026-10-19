@@ -614,7 +614,7 @@ function ExArg() {
 // FINAL .ea .op .left .list .rest .right .type_str
 // EXPORT .ea .body
 // IMPORT .ea .str .left
-// VIM9SCRIPT .ea
+// VIM9SCRIPT .ea .noclear
 function Node(type) {
     return {"type":type};
 }
@@ -636,6 +636,22 @@ VimLParser.prototype.__init__ = function() {
     this.vim9script = 0;
 }
 
+// Vim9 syntax applies inside :def functions, and in a Vim9 script outside of
+// legacy :function bodies.
+VimLParser.prototype.isvim9 = function() {
+    var __c3 = this.context;
+    for (var __i3 = 0; __i3 < __c3.length; ++__i3) {
+        var node = __c3[__i3];
+        if (node.type == NODE_DEF) {
+            return TRUE;
+        }
+        else if (node.type == NODE_FUNCTION) {
+            return FALSE;
+        }
+    }
+    return this.vim9script;
+}
+
 VimLParser.prototype.push_context = function(node) {
     viml_insert(this.context, node);
 }
@@ -646,9 +662,9 @@ VimLParser.prototype.pop_context = function() {
 
 VimLParser.prototype.find_context = function(type) {
     var i = 0;
-    var __c3 = this.context;
-    for (var __i3 = 0; __i3 < __c3.length; ++__i3) {
-        var node = __c3[__i3];
+    var __c4 = this.context;
+    for (var __i4 = 0; __i4 < __c4.length; ++__i4) {
+        var node = __c4[__i4];
         if (node.type == type) {
             return i;
         }
@@ -729,12 +745,12 @@ VimLParser.prototype.parse_one_cmd = function() {
         this.reader.get();
         return;
     }
-    if (this.reader.peekn(1) == "\"") {
+    if (this.reader.peekn(1) == "\"" && !this.isvim9()) {
         this.parse_comment();
         this.reader.get();
         return;
     }
-    if (this.vim9script && this.reader.peekn(1) == "#") {
+    if (this.isvim9() && this.reader.peekn(1) == "#") {
         this.parse_comment();
         this.reader.get();
         return;
@@ -996,7 +1012,7 @@ VimLParser.prototype.parse_pattern = function(delimiter) {
 VimLParser.prototype.parse_command = function() {
     this.reader.skip_white_and_colon();
     this.ea.cmdpos = this.reader.getpos();
-    if (this.reader.peekn(1) == "" || this.reader.peekn(1) == "\"" || this.vim9script && this.reader.peekn(1) == "#") {
+    if (this.reader.peekn(1) == "" || this.ends_excmds(this.reader.peekn(1))) {
         if (!viml_empty(this.ea.modifiers) || !viml_empty(this.ea.range)) {
             this.parse_cmd_modifier_range();
         }
@@ -1006,6 +1022,17 @@ VimLParser.prototype.parse_command = function() {
     if (this.ea.cmd === NIL) {
         this.reader.setpos(this.ea.cmdpos);
         throw Err(viml_printf("E492: Not an editor command: %s", this.reader.peekline()), this.ea.cmdpos);
+    }
+    // In legacy script :final is an abbreviation of :finally.
+    if (this.ea.cmd.name == "final" && !this.isvim9()) {
+        var __c5 = this.builtin_commands;
+        for (var __i5 = 0; __i5 < __c5.length; ++__i5) {
+            var x = __c5[__i5];
+            if (x.name == "finally") {
+                this.ea.cmd = x;
+                break;
+            }
+        }
     }
     if (this.reader.peekn(1) == "!" && this.ea.cmd.name != "substitute" && this.ea.cmd.name != "smagic" && this.ea.cmd.name != "snomagic") {
         this.reader.getn(1);
@@ -1273,9 +1300,9 @@ VimLParser.prototype.find_command = function() {
         return this.find_command_cache[name];
     }
     var cmd = NIL;
-    var __c4 = this.builtin_commands;
-    for (var __i4 = 0; __i4 < __c4.length; ++__i4) {
-        var x = __c4[__i4];
+    var __c6 = this.builtin_commands;
+    for (var __i6 = 0; __i6 < __c6.length; ++__i6) {
+        var x = __c6[__i6];
         if (viml_stridx(x.name, name) == 0 && viml_len(name) >= x.minlen) {
             delete cmd;
             var cmd = x;
@@ -1283,18 +1310,18 @@ VimLParser.prototype.find_command = function() {
         }
     }
     if (this.neovim) {
-        var __c5 = this.neovim_additional_commands;
-        for (var __i5 = 0; __i5 < __c5.length; ++__i5) {
-            var x = __c5[__i5];
+        var __c7 = this.neovim_additional_commands;
+        for (var __i7 = 0; __i7 < __c7.length; ++__i7) {
+            var x = __c7[__i7];
             if (viml_stridx(x.name, name) == 0 && viml_len(name) >= x.minlen) {
                 delete cmd;
                 var cmd = x;
                 break;
             }
         }
-        var __c6 = this.neovim_removed_commands;
-        for (var __i6 = 0; __i6 < __c6.length; ++__i6) {
-            var x = __c6[__i6];
+        var __c8 = this.neovim_removed_commands;
+        for (var __i8 = 0; __i8 < __c8.length; ++__i8) {
+            var x = __c8[__i8];
             if (viml_stridx(x.name, name) == 0 && viml_len(name) >= x.minlen) {
                 delete cmd;
                 var cmd = NIL;
@@ -1405,7 +1432,7 @@ VimLParser.prototype.read_cmdarg = function() {
 VimLParser.prototype.parse_comment = function() {
     var npos = this.reader.getpos();
     var c = this.reader.get();
-    if (c != "\"" && !(this.vim9script && c == "#")) {
+    if (c != "\"" && !(this.isvim9() && c == "#")) {
         throw Err(viml_printf("unexpected character: %s", c), npos);
     }
     var node = Node(NODE_COMMENT);
@@ -1426,11 +1453,11 @@ VimLParser.prototype.parse_trail = function() {
     else if (c == "|") {
         this.reader.get();
     }
-    else if (c == "\"") {
+    else if (c == "\"" && !this.isvim9()) {
         this.parse_comment();
         this.reader.get();
     }
-    else if (this.vim9script && c == "#") {
+    else if (this.isvim9() && c == "#") {
         this.parse_comment();
         this.reader.get();
     }
@@ -1481,6 +1508,7 @@ VimLParser.prototype.separate_nextcmd = function() {
     if (this.ea.cmd.name == "vimgrep" || this.ea.cmd.name == "vimgrepadd" || this.ea.cmd.name == "lvimgrep" || this.ea.cmd.name == "lvimgrepadd") {
         this.skip_vimgrep_pat();
     }
+    var vim9 = this.isvim9();
     var pc = "";
     var end = this.reader.getpos();
     var nospend = end;
@@ -1513,7 +1541,7 @@ VimLParser.prototype.separate_nextcmd = function() {
             }
             this.reader.getn(1);
         }
-        else if (c == "|" || c == "\n" || c == "\"" && !viml_eqregh(this.ea.cmd.flags, "\\<NOTRLCOM\\>") && (this.ea.cmd.name != "@" && this.ea.cmd.name != "*" || this.reader.getpos() != this.ea.argpos) && (this.ea.cmd.name != "redir" || this.reader.getpos().i != this.ea.argpos.i + 1 || pc != "@") || this.vim9script && c == "#" && iswhite(pc) && !viml_eqregh(this.ea.cmd.flags, "\\<NOTRLCOM\\>")) {
+        else if (c == "|" || c == "\n" || c == "\"" && !vim9 && !viml_eqregh(this.ea.cmd.flags, "\\<NOTRLCOM\\>") && (this.ea.cmd.name != "@" && this.ea.cmd.name != "*" || this.reader.getpos() != this.ea.argpos) && (this.ea.cmd.name != "redir" || this.reader.getpos().i != this.ea.argpos.i + 1 || pc != "@") || vim9 && c == "#" && iswhite(pc) && !viml_eqregh(this.ea.cmd.flags, "\\<NOTRLCOM\\>")) {
             var has_cpo_bar = FALSE;
             // &cpoptions =~ 'b'
             if ((!has_cpo_bar || !viml_eqregh(this.ea.cmd.flags, "\\<USECTRLV\\>")) && pc == "\\") {
@@ -2028,10 +2056,18 @@ VimLParser.prototype.parse_cmd_const = function() {
 }
 
 VimLParser.prototype.parse_cmd_vim9script = function() {
-    this.reader.skip_white();
     var node = Node(NODE_VIM9SCRIPT);
     node.pos = this.ea.cmdpos;
     node.ea = this.ea;
+    node.noclear = FALSE;
+    this.reader.skip_white();
+    var pos = this.reader.tell();
+    if (this.reader.read_alpha() == "noclear") {
+        node.noclear = TRUE;
+    }
+    else {
+        this.reader.seek_set(pos);
+    }
     this.vim9script = 1;
     this.add_node(node);
 }
@@ -2897,8 +2933,13 @@ VimLParser.prototype.parse_constlhs = function() {
 }
 
 VimLParser.prototype.ends_excmds = function(c) {
-    if (this.vim9script && c == "#") {
-        return 1;
+    if (this.isvim9()) {
+        if (c == "#") {
+            return 1;
+        }
+        else if (c == "\"") {
+            return 0;
+        }
     }
     return c == "" || c == "|" || c == "\"" || c == "<EOF>" || c == "<EOL>";
 }
@@ -4509,9 +4550,9 @@ StringReader.prototype.__init__ = function(lines) {
     var offset = 0;
     while (lnum < viml_len(lines)) {
         var col = 0;
-        var __c7 = viml_split(lines[lnum], "\\zs");
-        for (var __i7 = 0; __i7 < __c7.length; ++__i7) {
-            var c = __c7[__i7];
+        var __c9 = viml_split(lines[lnum], "\\zs");
+        for (var __i9 = 0; __i9 < __c9.length; ++__i9) {
+            var c = __c9[__i9];
             viml_add(this.buf, c);
             viml_add(this.pos, [lnum + 1, col + 1, offset]);
             col += viml_len(c);
@@ -4520,9 +4561,9 @@ StringReader.prototype.__init__ = function(lines) {
         while (lnum + 1 < viml_len(lines) && viml_eqregh(lines[lnum + 1], "^\\s*\\\\")) {
             var skip = TRUE;
             var col = 0;
-            var __c8 = viml_split(lines[lnum + 1], "\\zs");
-            for (var __i8 = 0; __i8 < __c8.length; ++__i8) {
-                var c = __c8[__i8];
+            var __c10 = viml_split(lines[lnum + 1], "\\zs");
+            for (var __i10 = 0; __i10 < __c10.length; ++__i10) {
+                var c = __c10[__i10];
                 if (skip) {
                     if (c == "\\") {
                         var skip = FALSE;
@@ -4624,9 +4665,9 @@ StringReader.prototype.readline = function() {
 
 StringReader.prototype.getstr = function(begin, end) {
     var r = "";
-    var __c9 = viml_range(begin.i, end.i - 1);
-    for (var __i9 = 0; __i9 < __c9.length; ++__i9) {
-        var i = __c9[__i9];
+    var __c11 = viml_range(begin.i, end.i - 1);
+    for (var __i11 = 0; __i11 < __c11.length; ++__i11) {
+        var i = __c11[__i11];
         if (i >= viml_len(this.buf)) {
             break;
         }
@@ -5135,9 +5176,9 @@ Compiler.prototype.compile = function(node) {
 }
 
 Compiler.prototype.compile_body = function(body) {
-    var __c10 = body;
-    for (var __i10 = 0; __i10 < __c10.length; ++__i10) {
-        var node = __c10[__i10];
+    var __c12 = body;
+    for (var __i12 = 0; __i12 < __c12.length; ++__i12) {
+        var node = __c12[__i12];
         this.compile(node);
     }
 }
@@ -5165,9 +5206,9 @@ Compiler.prototype.compile_function = function(node) {
             viml_remove(rlist, -1);
             var remaining = TRUE;
         }
-        var __c11 = viml_range(viml_len(rlist));
-        for (var __i11 = 0; __i11 < __c11.length; ++__i11) {
-            var i = __c11[__i11];
+        var __c13 = viml_range(viml_len(rlist));
+        for (var __i13 = 0; __i13 < __c13.length; ++__i13) {
+            var i = __c13[__i13];
             if (i < viml_len(rlist) - viml_len(default_args)) {
                 left += viml_printf(" %s", rlist[i]);
             }
@@ -5270,9 +5311,9 @@ Compiler.prototype.compile_if = function(node) {
     this.incindent("  ");
     this.compile_body(node.body);
     this.decindent();
-    var __c12 = node.elseif;
-    for (var __i12 = 0; __i12 < __c12.length; ++__i12) {
-        var enode = __c12[__i12];
+    var __c14 = node.elseif;
+    for (var __i14 = 0; __i14 < __c14.length; ++__i14) {
+        var enode = __c14[__i14];
         this.out(" elseif %s", this.compile(enode.cond));
         this.incindent("  ");
         this.compile_body(enode.body);
@@ -5329,9 +5370,9 @@ Compiler.prototype.compile_try = function(node) {
     this.out("(try");
     this.incindent("  ");
     this.compile_body(node.body);
-    var __c13 = node.catch;
-    for (var __i13 = 0; __i13 < __c13.length; ++__i13) {
-        var cnode = __c13[__i13];
+    var __c15 = node.catch;
+    for (var __i15 = 0; __i15 < __c15.length; ++__i15) {
+        var cnode = __c15[__i15];
         if (cnode.pattern !== NIL) {
             this.decindent();
             this.out(" catch /%s/", cnode.pattern);
@@ -5660,9 +5701,9 @@ Compiler.prototype.compile_curlynameexpr = function(node) {
 Compiler.prototype.escape_string = function(str) {
     var m = {"\n":"\\n", "\t":"\\t", "\r":"\\r"};
     var out = "\"";
-    var __c14 = viml_range(viml_len(str));
-    for (var __i14 = 0; __i14 < __c14.length; ++__i14) {
-        var i = __c14[__i14];
+    var __c16 = viml_range(viml_len(str));
+    for (var __i16 = 0; __i16 < __c16.length; ++__i16) {
+        var i = __c16[__i16];
         var c = str[i];
         if (viml_has_key(m, c)) {
             out += m[c];
@@ -5698,7 +5739,12 @@ Compiler.prototype.compile_heredoc = function(node) {
 }
 
 Compiler.prototype.compile_vim9script = function(node) {
-    this.out("(vim9script)");
+    if (node.noclear) {
+        this.out("(vim9script noclear)");
+    }
+    else {
+        this.out("(vim9script)");
+    }
 }
 
 Compiler.prototype.compile_def = function(node) {
@@ -5712,9 +5758,9 @@ Compiler.prototype.compile_def = function(node) {
             viml_remove(rlist, -1);
             var remaining = TRUE;
         }
-        var __c15 = viml_range(viml_len(rlist));
-        for (var __i15 = 0; __i15 < __c15.length; ++__i15) {
-            var i = __c15[__i15];
+        var __c17 = viml_range(viml_len(rlist));
+        for (var __i17 = 0; __i17 < __c17.length; ++__i17) {
+            var i = __c17[__i17];
             if (i < viml_len(rlist) - viml_len(default_args)) {
                 left += viml_printf(" %s", rlist[i]);
             }
@@ -6468,9 +6514,9 @@ RegexpParser.prototype.get_token_sq_char_class = function() {
         var r = this.reader.read_alpha();
         if (this.reader.p(0) == ":" && this.reader.p(1) == "]") {
             this.reader.seek_cur(2);
-            var __c16 = class_names;
-            for (var __i16 = 0; __i16 < __c16.length; ++__i16) {
-                var name = __c16[__i16];
+            var __c18 = class_names;
+            for (var __i18 = 0; __i18 < __c18.length; ++__i18) {
+                var name = __c18[__i18];
                 if (r == name) {
                     return "[:" + name + ":]";
                 }
@@ -6603,9 +6649,9 @@ RegexpParser.prototype.getoctchrs = function() {
 
 RegexpParser.prototype.gethexchrs = function(n) {
     var r = "";
-    var __c17 = viml_range(n);
-    for (var __i17 = 0; __i17 < __c17.length; ++__i17) {
-        var i = __c17[__i17];
+    var __c19 = viml_range(n);
+    for (var __i19 = 0; __i19 < __c19.length; ++__i19) {
+        var i = __c19[__i19];
         var c = this.reader.peek();
         if (!isxdigit(c)) {
             break;
