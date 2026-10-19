@@ -517,7 +517,7 @@ def ExArg():
 # RETURN .ea .left
 # EXCALL .ea .left
 # LET .ea .op .left .list .rest .right
-# CONST .ea .op .left .list .rest .right
+# CONST .ea .op .left .list .rest .right [.type_str]
 # UNLET .ea .list
 # LOCKVAR .ea .depth .list
 # UNLOCKVAR .ea .depth .list
@@ -1908,6 +1908,9 @@ class VimLParser:
         return prefix
 
     def parse_cmd_const(self):
+        if self.isvim9():
+            self.parse_vim9_decl(NODE_CONST)
+            return
         pos = self.reader.tell()
         self.reader.skip_white()
         # :const
@@ -2068,6 +2071,11 @@ class VimLParser:
                 type_str += self.reader.getn(1)
             else:
                 break
+        # Handle func: rettype
+        if type_str == "func" and self.reader.peekn(1) == ":" and iswhite(self.reader.p(1)):
+            self.reader.getn(1)
+            self.reader.skip_white()
+            return type_str + ": " + self.read_type()
         # Handle generics: type<...>
         if self.reader.peekn(1) == "<":
             type_str += self.reader.getn(1)
@@ -2097,9 +2105,9 @@ class VimLParser:
             # Check for ': rettype' after func params
             self.reader.skip_white()
             if self.reader.peekn(1) == ":":
-                type_str += self.reader.getn(1)
+                self.reader.getn(1)
                 self.reader.skip_white()
-                type_str += self.read_type()
+                type_str += ": " + self.read_type()
         return type_str
 
     # Parse the statements of a Vim9 lambda "(args) => {", up to the "}" at the
@@ -2141,107 +2149,78 @@ class VimLParser:
         self.pop_context()
 
     def parse_cmd_var(self):
+        self.parse_vim9_decl(NODE_VAR)
+
+    def parse_cmd_final(self):
+        self.parse_vim9_decl(NODE_FINAL)
+
+    # Vim9 declaration with :var, :final or :const:
+    #   var name[: type] [= expr]
+    #   var [name[: type], ...[; rest]] = expr
+    #   var name[: type] =<< [trim] [eval] END
+    def parse_vim9_decl(self, type):
         pos = self.reader.tell()
         self.reader.skip_white()
-        # :var
+        # :var without argument lists variables
         if self.ends_excmds(self.reader.peek()):
             self.reader.seek_set(pos)
             self.parse_cmd_common()
             return
-        # Read variable name directly (avoid LvalueParser eating ':' as part of name)
-        npos = self.reader.getpos()
-        vname = self.reader.read_word()
-        if vname == "":
-            self.reader.seek_set(pos)
-            self.parse_cmd_common()
-            return
-        left = Node(NODE_IDENTIFIER)
-        left.pos = npos
-        left.value = vname
-        self.reader.skip_white()
-        # Check for type annotation
-        type_str = ""
-        if self.reader.peekn(1) == ":":
-            self.reader.getn(1)
-            self.reader.skip_white()
-            type_str = self.read_type()
-            self.reader.skip_white()
-        s1 = self.reader.peekn(1)
-        s2 = self.reader.peekn(2)
-        if s2 == "..":
-            s2 = self.reader.peekn(3)
-        # :var {var-name} (no assignment)
-        if self.ends_excmds(s1) or s2 != "+=" and s2 != "-=" and s2 != ".=" and s2 != "..=" and s2 != "*=" and s2 != "/=" and s2 != "%=" and s1 != "=":
-            self.reader.seek_set(pos)
-            self.parse_cmd_common()
-            return
-        # :var left op right
-        node = Node(NODE_VAR)
+        node = Node(type)
         node.pos = self.ea.cmdpos
         node.ea = self.ea
         node.op = ""
-        node.left = left
+        node.left = NIL
         node.list = NIL
         node.rest = NIL
         node.right = NIL
-        node.type_str = type_str
-        self.declare(left)
-        if s2 == "+=" or s2 == "-=" or s2 == ".=" or s2 == "..=" or s2 == "*=" or s2 == "/=" or s2 == "%=":
-            self.reader.getn(viml_len(s2))
-            node.op = s2
-        elif s1 == "=":
+        node.type_str = ""
+        if self.reader.peekn(1) == "[":
             self.reader.getn(1)
-            node.op = s1
+            node.list = []
+            while TRUE:
+                viml_add(node.list, self.parse_vim9_decl_name())
+                self.reader.skip_white()
+                c = self.reader.getn(1)
+                if c == ";":
+                    node.rest = self.parse_vim9_decl_name()
+                    self.reader.skip_white()
+                    c = self.reader.getn(1)
+                if c == "]":
+                    break
+                elif c != ",":
+                    raise VimLParserException(Err(viml_printf("E475: Invalid argument: %s", c), self.reader.getpos()))
+            for x in node.list:
+                self.declare(x)
+            self.declare(node.rest)
         else:
-            raise VimLParserException("NOT REACHED")
-        node.right = self.parse_expr()
+            node.left = self.parse_vim9_decl_name()
+            node.type_str = node.left.type_str
+            self.declare(node.left)
+        self.reader.skip_white()
+        node.op = self.peek_assign_op()
+        self.reader.getn(viml_len(node.op))
+        if node.op == "=<<":
+            self.reader.skip_white()
+            node.right = self.parse_heredoc(self.heredoc_prefix())
+        elif node.op != "":
+            node.right = self.parse_expr()
         self.add_node(node)
 
-    def parse_cmd_final(self):
-        pos = self.reader.tell()
+    # Variable name with an optional type in a Vim9 declaration: "name: type"
+    def parse_vim9_decl_name(self):
         self.reader.skip_white()
-        # :final
-        if self.ends_excmds(self.reader.peek()):
-            self.reader.seek_set(pos)
-            self.parse_cmd_common()
-            return
-        # Read variable name directly
-        npos = self.reader.getpos()
-        vname = self.reader.read_word()
-        if vname == "":
-            self.reader.seek_set(pos)
-            self.parse_cmd_common()
-            return
-        left = Node(NODE_IDENTIFIER)
-        left.pos = npos
-        left.value = vname
-        self.reader.skip_white()
-        # Check for type annotation
-        type_str = ""
+        node = Node(NODE_IDENTIFIER)
+        node.pos = self.reader.getpos()
+        node.value = self.reader.read_vim9_name()
+        node.type_str = ""
+        if node.value == "":
+            raise VimLParserException(Err(viml_printf("E475: Invalid argument: %s", self.reader.peekline()), node.pos))
         if self.reader.peekn(1) == ":":
             self.reader.getn(1)
             self.reader.skip_white()
-            type_str = self.read_type()
-            self.reader.skip_white()
-        s1 = self.reader.peekn(1)
-        # :final {var-name}
-        if self.ends_excmds(s1) or s1 != "=":
-            self.reader.seek_set(pos)
-            self.parse_cmd_common()
-            return
-        # :final left = right
-        node = Node(NODE_FINAL)
-        node.pos = self.ea.cmdpos
-        node.ea = self.ea
-        self.reader.getn(1)
-        node.op = s1
-        node.left = left
-        node.list = NIL
-        node.rest = NIL
-        node.right = self.parse_expr()
-        node.type_str = type_str
-        self.declare(left)
-        self.add_node(node)
+            node.type_str = self.read_type()
+        return node
 
     def parse_cmd_export(self):
         self.reader.skip_white()
@@ -2437,7 +2416,10 @@ class VimLParser:
         node.left = NIL
         node.right = NIL
         node.endfor = NIL
-        lhs = self.parse_letlhs()
+        if self.isvim9():
+            lhs = self.parse_vim9_forlhs()
+        else:
+            lhs = self.parse_letlhs()
         node.left = lhs.left
         node.list = lhs.list
         node.rest = lhs.rest
@@ -2453,6 +2435,30 @@ class VimLParser:
         node.right = self.parse_expr()
         self.add_node(node)
         self.push_context(node)
+
+    # Vim9 :for loop variables with optional types: "name: type" or
+    # "[name: type, ...]"
+    def parse_vim9_forlhs(self):
+        lhs = AttributeDict({"left": NIL, "list": NIL, "rest": NIL})
+        self.reader.skip_white()
+        if self.reader.peekn(1) != "[":
+            lhs.left = self.parse_vim9_decl_name()
+            return lhs
+        self.reader.getn(1)
+        lhs.list = []
+        while TRUE:
+            viml_add(lhs.list, self.parse_vim9_decl_name())
+            self.reader.skip_white()
+            c = self.reader.getn(1)
+            if c == ";":
+                lhs.rest = self.parse_vim9_decl_name()
+                self.reader.skip_white()
+                c = self.reader.getn(1)
+            if c == "]":
+                break
+            elif c != ",":
+                raise VimLParserException(Err(viml_printf("E475: Invalid argument: %s", c), self.reader.getpos()))
+        return lhs
 
     def parse_cmd_endfor(self):
         if self.context[0].type != NODE_FOR:
@@ -4497,7 +4503,7 @@ class StringReader:
     def read_vim9_name(self):
         r = ""
         c = self.peekn(1)
-        if c != "" and viml_stridx("bgltsvw", c) != -1 and self.p(1) == ":":
+        if c != "" and viml_stridx("bgltsvw", c) != -1 and self.p(1) == ":" and not iswhite(self.p(2)):
             r = self.getn(2)
         while iswordc(self.peekn(1)) or self.peekn(1) == "#":
             r += self.getn(1)
@@ -4861,16 +4867,7 @@ class Compiler:
 
     # TODO: merge with s:Compiler.compile_let() ?
     def compile_const(self, node):
-        left = ""
-        if node.left is not NIL:
-            left = self.compile(node.left)
-        else:
-            left = viml_join([self.compile(vval) for vval in node.list], " ")
-            if node.rest is not NIL:
-                left += " . " + self.compile(node.rest)
-            left = "(" + left + ")"
-        right = self.compile(node.right)
-        self.out("(const %s %s %s)", node.op, left, right)
+        self.compile_decl(node, "const")
 
     def compile_unlet(self, node):
         list = [self.compile(vval) for vval in node.list]
@@ -4919,11 +4916,11 @@ class Compiler:
     def compile_for(self, node):
         left = ""
         if node.left is not NIL:
-            left = self.compile(node.left)
+            left = self.compile_decl_name(node.left)
         else:
-            left = viml_join([self.compile(vval) for vval in node.list], " ")
+            left = viml_join([self.compile_decl_name(vval) for vval in node.list], " ")
             if node.rest is not NIL:
-                left += " . " + self.compile(node.rest)
+                left += " . " + self.compile_decl_name(node.rest)
             left = "(" + left + ")"
         right = self.compile(node.right)
         self.out("(for %s %s", left, right)
@@ -5274,32 +5271,31 @@ class Compiler:
         self.decindent()
 
     def compile_var(self, node):
-        left = ""
-        if node.left is not NIL:
-            left = self.compile(node.left)
-        else:
-            left = viml_join([self.compile(vval) for vval in node.list], " ")
-            if node.rest is not NIL:
-                left += " . " + self.compile(node.rest)
-            left = "(" + left + ")"
-        if node.type_str != "":
-            left += ": " + node.type_str
-        right = self.compile(node.right)
-        self.out("(var %s %s %s)", node.op, left, right)
+        self.compile_decl(node, "var")
 
     def compile_final(self, node):
+        self.compile_decl(node, "final")
+
+    # A declared name with its Vim9 type, if any: "name: type"
+    def compile_decl_name(self, node):
+        name = self.compile(node)
+        if viml_has_key(node, "type_str") and node.type_str != "":
+            name += ": " + node.type_str
+        return name
+
+    def compile_decl(self, node, cmd):
         left = ""
         if node.left is not NIL:
-            left = self.compile(node.left)
+            left = self.compile_decl_name(node.left)
         else:
-            left = viml_join([self.compile(vval) for vval in node.list], " ")
+            left = viml_join([self.compile_decl_name(vval) for vval in node.list], " ")
             if node.rest is not NIL:
-                left += " . " + self.compile(node.rest)
+                left += " . " + self.compile_decl_name(node.rest)
             left = "(" + left + ")"
-        if node.type_str != "":
-            left += ": " + node.type_str
-        right = self.compile(node.right)
-        self.out("(final %s %s %s)", node.op, left, right)
+        if node.right is NIL:
+            self.out("(%s %s)", cmd, left)
+        else:
+            self.out("(%s %s %s %s)", cmd, node.op, left, self.compile(node.right))
 
     def compile_export(self, node):
         self.out("(export")
