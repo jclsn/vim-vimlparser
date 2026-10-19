@@ -4002,6 +4002,13 @@ let s:VimLParser.builtin_commands = [
       \ {'name': 'X', 'minlen': 1, 'flags': 'TRLBAR', 'parser': 'parse_cmd_common'},
       \ {'name': '++', 'minlen': 1, 'flags': 'EXTRA|TRLBAR|SBOXOK|CMDWIN|LOCK_OK', 'parser': 'parse_cmd_common'},
       \ {'name': '--', 'minlen': 1, 'flags': 'EXTRA|TRLBAR|SBOXOK|CMDWIN|LOCK_OK', 'parser': 'parse_cmd_common'},
+      \ {'name': 'clipreset', 'minlen': 4, 'flags': 'TRLBAR|CMDWIN|LOCK_OK', 'parser': 'parse_cmd_common'},
+      \ {'name': 'iput', 'minlen': 2, 'flags': 'RANGE|WHOLEFOLD|BANG|REGSTR|TRLBAR|ZEROR|CMDWIN|LOCK_OK|MODIFY', 'parser': 'parse_cmd_common'},
+      \ {'name': 'pbuffer', 'minlen': 2, 'flags': 'BANG|RANGE|BUFNAME|BUFUNL|COUNT|EXTRA|CMDARG|TRLBAR', 'parser': 'parse_cmd_common'},
+      \ {'name': 'redrawtabpanel', 'minlen': 10, 'flags': 'TRLBAR|CMDWIN|LOCK_OK', 'parser': 'parse_cmd_common'},
+      \ {'name': 'this', 'minlen': 3, 'flags': 'EXTRA|NEEDARG|SBOXOK|CMDWIN|LOCK_OK|WHOLE', 'parser': 'parse_cmd_common'},
+      \ {'name': 'uniq', 'minlen': 3, 'flags': 'RANGE|DFLALL|WHOLEFOLD|BANG|EXTRA|NOTRLCOM|MODIFY', 'parser': 'parse_cmd_common'},
+      \ {'name': 'wlrestore', 'minlen': 2, 'flags': 'EXTRA|TRLBAR|CMDWIN|LOCK_OK|BANG', 'parser': 'parse_cmd_common'},
       \]
 
 " To find new builtin_functions, run the below script.
