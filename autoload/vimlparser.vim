@@ -2081,6 +2081,15 @@ function! s:VimLParser.parse_cmd_def() abort
   endif
 
   let left = self.parse_lvalue_func()
+
+  " Generic function: :def {name}<{type}, ...>(
+  let type_params = ''
+  if self.reader.peekn(1) ==# '<'
+    while self.reader.peekn(1) !=# '' && self.reader.peekn(1) !=# '>'
+      let type_params .= self.reader.getn(1)
+    endwhile
+    let type_params .= self.reader.getn(1)
+  endif
   call self.reader.skip_white()
 
   " :def {name}
@@ -2098,91 +2107,66 @@ function! s:VimLParser.parse_cmd_def() abort
   let node.left = left
   let node.rlist = []
   let node.default_args = []
-  let node.attr = {'range': 0, 'abort': 0, 'dict': 0, 'closure': 0, 'return_type': ''}
+  let node.attr = {'range': 0, 'abort': 0, 'dict': 0, 'closure': 0, 'return_type': '', 'type_params': type_params}
   let node.enddef = s:NIL
+  " The arguments use Vim9 syntax, also in a legacy script.
+  call self.add_node(node)
+  call self.push_context(node)
   call self.reader.getn(1)
-  call self.reader.skip_white()
-  if self.reader.peekn(1) ==# ')'
-    call self.reader.getn(1)
-  else
-    let named = {}
-    while s:TRUE
-      let varnode = s:Node(s:NODE_IDENTIFIER)
+  let named = {}
+  while s:TRUE
+    call self.skip_vim9_white()
+    if self.reader.peekn(1) ==# ')'
+      call self.reader.getn(1)
+      break
+    endif
+    let varnode = s:Node(s:NODE_IDENTIFIER)
+    let varnode.pos = self.reader.getpos()
+    let varnode.type_str = ''
+    let variadic = self.reader.peekn(3) ==# '...'
+    if variadic
+      call self.reader.getn(3)
+    endif
+    let pname = self.reader.read_word()
+    if pname ==# 'this' && self.reader.peekn(1) ==# '.'
+      " constructor argument that sets an object variable: this.name
+      let pname .= self.reader.getn(1) . self.reader.read_word()
+    endif
+    if pname ==# ''
+      throw s:Err(printf('E475: Invalid argument: %s', self.reader.peekn(1)), self.reader.getpos())
+    endif
+    if has_key(named, pname) && pname !=# '_'
+      throw s:Err(printf('E853: Duplicate argument name: %s', pname), varnode.pos)
+    endif
+    let named[pname] = 1
+    let self.declared[pname] = 1
+    let varnode.value = pname
+    if variadic
+      let varnode.value = '...' . pname
+    endif
+    call add(node.rlist, varnode)
+    " Check for type annotation
+    if self.reader.peekn(1) ==# ':'
+      call self.reader.getn(1)
       call self.reader.skip_white()
-      let varnode.type_str = ''
-      " Check for ...name (variadic)
-      if self.reader.peekn(3) ==# '...'
-        call self.reader.getn(3)
-        call self.reader.skip_white()
-        let vname = self.reader.read_word()
-        let varnode.pos = self.reader.getpos()
-        let varnode.value = '...' . vname
-        let self.declared[vname] = 1
-        " Optionally read type annotation
-        call self.reader.skip_white()
-        if self.reader.peekn(1) ==# ':'
-          call self.reader.getn(1)
-          call self.reader.skip_white()
-          let varnode.type_str = self.read_type()
-        endif
-        call add(node.rlist, varnode)
-        call self.reader.skip_white()
-        if self.reader.peekn(1) ==# ')'
-          call self.reader.getn(1)
-          break
-        else
-          throw s:Err(printf('E475: Invalid argument: %s', self.reader.peekn(1)), self.reader.getpos())
-        endif
-      endif
-      let npos = self.reader.getpos()
-      let pname = self.reader.read_word()
-      if pname ==# ''
-        if self.reader.peekn(1) ==# ')'
-          call self.reader.getn(1)
-          break
-        endif
-        throw s:Err(printf('E475: Invalid argument: %s', self.reader.peekn(1)), self.reader.getpos())
-      endif
-      if has_key(named, pname)
-        throw s:Err(printf('E853: Duplicate argument name: %s', pname), npos)
-      endif
-      let named[pname] = 1
-      let varnode.pos = npos
-      let varnode.value = pname
-      call add(node.rlist, varnode)
-      call self.declare(varnode)
-      " Check for type annotation
+      let varnode.type_str = self.read_type()
+    endif
+    " Check for default value
+    call self.reader.skip_white()
+    if self.reader.peekn(1) ==# '=' && !variadic
+      call self.reader.getn(1)
       call self.reader.skip_white()
-      if self.reader.peekn(1) ==# ':'
-        call self.reader.getn(1)
-        call self.reader.skip_white()
-        let varnode.type_str = self.read_type()
-      endif
-      " Check for default value
-      call self.reader.skip_white()
-      if self.reader.peekn(1) ==# '='
-        call self.reader.getn(1)
-        call self.reader.skip_white()
-        call add(node.default_args, self.parse_expr())
-      elseif len(node.default_args) > 0
-        throw s:Err('E989: Non-default argument follows default argument', varnode.pos)
-      endif
-      call self.reader.skip_white()
-      if self.reader.peekn(1) ==# ','
-        call self.reader.getn(1)
-        call self.reader.skip_white()
-        if self.reader.peekn(1) ==# ')'
-          call self.reader.getn(1)
-          break
-        endif
-      elseif self.reader.peekn(1) ==# ')'
-        call self.reader.getn(1)
-        break
-      else
-        throw s:Err(printf('E475: Invalid argument: %s', self.reader.peekn(1)), self.reader.getpos())
-      endif
-    endwhile
-  endif
+      call add(node.default_args, self.parse_expr())
+    elseif len(node.default_args) > 0 && !variadic
+      throw s:Err('E989: Non-default argument follows default argument', varnode.pos)
+    endif
+    call self.skip_vim9_white()
+    if self.reader.peekn(1) ==# ','
+      call self.reader.getn(1)
+    elseif self.reader.peekn(1) !=# ')'
+      throw s:Err(printf('E475: Invalid argument: %s', self.reader.peekn(1)), self.reader.getpos())
+    endif
+  endwhile
   " Check for return type annotation ': type'
   call self.reader.skip_white()
   if self.reader.peekn(1) ==# ':'
@@ -2190,8 +2174,21 @@ function! s:VimLParser.parse_cmd_def() abort
     call self.reader.skip_white()
     let node.attr.return_type = self.read_type()
   endif
-  call self.add_node(node)
-  call self.push_context(node)
+endfunction
+
+" Skip white space, comments and line breaks, e.g. in the argument list of a
+" :def function.
+function! s:VimLParser.skip_vim9_white() abort
+  while s:TRUE
+    call self.reader.skip_white()
+    if self.reader.peek() ==# '#'
+      call self.reader.getn(-1)
+    endif
+    if self.reader.peek() !=# '<EOL>'
+      break
+    endif
+    call self.reader.get()
+  endwhile
 endfunction
 
 function! s:VimLParser.read_type() abort
@@ -7074,7 +7071,7 @@ function! s:Compiler.compile_vim9script(node) abort
 endfunction
 
 function! s:Compiler.compile_def(node) abort
-  let left = self.compile(a:node.left)
+  let left = self.compile(a:node.left) . a:node.attr.type_params
   let rlist = map(a:node.rlist, 'self.compile(v:val)')
   let default_args = map(a:node.default_args, 'self.compile(v:val)')
   if !empty(rlist)

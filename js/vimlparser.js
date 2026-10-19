@@ -2406,6 +2406,14 @@ VimLParser.prototype.parse_cmd_def = function() {
         return;
     }
     var left = this.parse_lvalue_func();
+    // Generic function: :def {name}<{type}, ...>(
+    var type_params = "";
+    if (this.reader.peekn(1) == "<") {
+        while (this.reader.peekn(1) != "" && this.reader.peekn(1) != ">") {
+            type_params += this.reader.getn(1);
+        }
+        type_params += this.reader.getn(1);
+    }
     this.reader.skip_white();
     // :def {name}
     if (this.reader.peekn(1) != "(") {
@@ -2421,94 +2429,66 @@ VimLParser.prototype.parse_cmd_def = function() {
     node.left = left;
     node.rlist = [];
     node.default_args = [];
-    node.attr = {"range":0, "abort":0, "dict":0, "closure":0, "return_type":""};
+    node.attr = {"range":0, "abort":0, "dict":0, "closure":0, "return_type":"", "type_params":type_params};
     node.enddef = NIL;
+    // The arguments use Vim9 syntax, also in a legacy script.
+    this.add_node(node);
+    this.push_context(node);
     this.reader.getn(1);
-    this.reader.skip_white();
-    if (this.reader.peekn(1) == ")") {
-        this.reader.getn(1);
-    }
-    else {
-        var named = {};
-        while (TRUE) {
-            var varnode = Node(NODE_IDENTIFIER);
+    var named = {};
+    while (TRUE) {
+        this.skip_vim9_white();
+        if (this.reader.peekn(1) == ")") {
+            this.reader.getn(1);
+            break;
+        }
+        var varnode = Node(NODE_IDENTIFIER);
+        varnode.pos = this.reader.getpos();
+        varnode.type_str = "";
+        var variadic = this.reader.peekn(3) == "...";
+        if (variadic) {
+            this.reader.getn(3);
+        }
+        var pname = this.reader.read_word();
+        if (pname == "this" && this.reader.peekn(1) == ".") {
+            // constructor argument that sets an object variable: this.name
+            pname += this.reader.getn(1) + this.reader.read_word();
+        }
+        if (pname == "") {
+            throw Err(viml_printf("E475: Invalid argument: %s", this.reader.peekn(1)), this.reader.getpos());
+        }
+        if (viml_has_key(named, pname) && pname != "_") {
+            throw Err(viml_printf("E853: Duplicate argument name: %s", pname), varnode.pos);
+        }
+        named[pname] = 1;
+        this.declared[pname] = 1;
+        varnode.value = pname;
+        if (variadic) {
+            varnode.value = "..." + pname;
+        }
+        viml_add(node.rlist, varnode);
+        // Check for type annotation
+        if (this.reader.peekn(1) == ":") {
+            this.reader.getn(1);
             this.reader.skip_white();
-            varnode.type_str = "";
-            // Check for ...name (variadic)
-            if (this.reader.peekn(3) == "...") {
-                this.reader.getn(3);
-                this.reader.skip_white();
-                var vname = this.reader.read_word();
-                varnode.pos = this.reader.getpos();
-                varnode.value = "..." + vname;
-                this.declared[vname] = 1;
-                // Optionally read type annotation
-                this.reader.skip_white();
-                if (this.reader.peekn(1) == ":") {
-                    this.reader.getn(1);
-                    this.reader.skip_white();
-                    varnode.type_str = this.read_type();
-                }
-                viml_add(node.rlist, varnode);
-                this.reader.skip_white();
-                if (this.reader.peekn(1) == ")") {
-                    this.reader.getn(1);
-                    break;
-                }
-                else {
-                    throw Err(viml_printf("E475: Invalid argument: %s", this.reader.peekn(1)), this.reader.getpos());
-                }
-            }
-            var npos = this.reader.getpos();
-            var pname = this.reader.read_word();
-            if (pname == "") {
-                if (this.reader.peekn(1) == ")") {
-                    this.reader.getn(1);
-                    break;
-                }
-                throw Err(viml_printf("E475: Invalid argument: %s", this.reader.peekn(1)), this.reader.getpos());
-            }
-            if (viml_has_key(named, pname)) {
-                throw Err(viml_printf("E853: Duplicate argument name: %s", pname), npos);
-            }
-            named[pname] = 1;
-            varnode.pos = npos;
-            varnode.value = pname;
-            viml_add(node.rlist, varnode);
-            this.declare(varnode);
-            // Check for type annotation
+            varnode.type_str = this.read_type();
+        }
+        // Check for default value
+        this.reader.skip_white();
+        if (this.reader.peekn(1) == "=" && !variadic) {
+            this.reader.getn(1);
             this.reader.skip_white();
-            if (this.reader.peekn(1) == ":") {
-                this.reader.getn(1);
-                this.reader.skip_white();
-                varnode.type_str = this.read_type();
-            }
-            // Check for default value
-            this.reader.skip_white();
-            if (this.reader.peekn(1) == "=") {
-                this.reader.getn(1);
-                this.reader.skip_white();
-                viml_add(node.default_args, this.parse_expr());
-            }
-            else if (viml_len(node.default_args) > 0) {
-                throw Err("E989: Non-default argument follows default argument", varnode.pos);
-            }
-            this.reader.skip_white();
-            if (this.reader.peekn(1) == ",") {
-                this.reader.getn(1);
-                this.reader.skip_white();
-                if (this.reader.peekn(1) == ")") {
-                    this.reader.getn(1);
-                    break;
-                }
-            }
-            else if (this.reader.peekn(1) == ")") {
-                this.reader.getn(1);
-                break;
-            }
-            else {
-                throw Err(viml_printf("E475: Invalid argument: %s", this.reader.peekn(1)), this.reader.getpos());
-            }
+            viml_add(node.default_args, this.parse_expr());
+        }
+        else if (viml_len(node.default_args) > 0 && !variadic) {
+            throw Err("E989: Non-default argument follows default argument", varnode.pos);
+        }
+        this.skip_vim9_white();
+        if (this.reader.peekn(1) == ",") {
+            this.reader.getn(1);
+        }
+        else if (this.reader.peekn(1) != ")") {
+            throw Err(viml_printf("E475: Invalid argument: %s", this.reader.peekn(1)), this.reader.getpos());
         }
     }
     // Check for return type annotation ': type'
@@ -2518,8 +2498,21 @@ VimLParser.prototype.parse_cmd_def = function() {
         this.reader.skip_white();
         node.attr.return_type = this.read_type();
     }
-    this.add_node(node);
-    this.push_context(node);
+}
+
+// Skip white space, comments and line breaks, e.g. in the argument list of a
+// :def function.
+VimLParser.prototype.skip_vim9_white = function() {
+    while (TRUE) {
+        this.reader.skip_white();
+        if (this.reader.peek() == "#") {
+            this.reader.getn(-1);
+        }
+        if (this.reader.peek() != "<EOL>") {
+            break;
+        }
+        this.reader.get();
+    }
 }
 
 VimLParser.prototype.read_type = function() {
@@ -6597,7 +6590,7 @@ Compiler.prototype.compile_vim9script = function(node) {
 }
 
 Compiler.prototype.compile_def = function(node) {
-    var left = this.compile(node.left);
+    var left = this.compile(node.left) + node.attr.type_params;
     var rlist = node.rlist.map((function(vval) { return this.compile(vval); }).bind(this));
     var default_args = node.default_args.map((function(vval) { return this.compile(vval); }).bind(this));
     if (!viml_empty(rlist)) {

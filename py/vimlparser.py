@@ -1966,6 +1966,12 @@ class VimLParser:
             self.parse_cmd_common()
             return
         left = self.parse_lvalue_func()
+        # Generic function: :def {name}<{type}, ...>(
+        type_params = ""
+        if self.reader.peekn(1) == "<":
+            while self.reader.peekn(1) != "" and self.reader.peekn(1) != ">":
+                type_params += self.reader.getn(1)
+            type_params += self.reader.getn(1)
         self.reader.skip_white()
         # :def {name}
         if self.reader.peekn(1) != "(":
@@ -1980,87 +1986,73 @@ class VimLParser:
         node.left = left
         node.rlist = []
         node.default_args = []
-        node.attr = AttributeDict({"range": 0, "abort": 0, "dict": 0, "closure": 0, "return_type": ""})
+        node.attr = AttributeDict({"range": 0, "abort": 0, "dict": 0, "closure": 0, "return_type": "", "type_params": type_params})
         node.enddef = NIL
+        # The arguments use Vim9 syntax, also in a legacy script.
+        self.add_node(node)
+        self.push_context(node)
         self.reader.getn(1)
-        self.reader.skip_white()
-        if self.reader.peekn(1) == ")":
-            self.reader.getn(1)
-        else:
-            named = AttributeDict({})
-            while TRUE:
-                varnode = Node(NODE_IDENTIFIER)
+        named = AttributeDict({})
+        while TRUE:
+            self.skip_vim9_white()
+            if self.reader.peekn(1) == ")":
+                self.reader.getn(1)
+                break
+            varnode = Node(NODE_IDENTIFIER)
+            varnode.pos = self.reader.getpos()
+            varnode.type_str = ""
+            variadic = self.reader.peekn(3) == "..."
+            if variadic:
+                self.reader.getn(3)
+            pname = self.reader.read_word()
+            if pname == "this" and self.reader.peekn(1) == ".":
+                # constructor argument that sets an object variable: this.name
+                pname += self.reader.getn(1) + self.reader.read_word()
+            if pname == "":
+                raise VimLParserException(Err(viml_printf("E475: Invalid argument: %s", self.reader.peekn(1)), self.reader.getpos()))
+            if viml_has_key(named, pname) and pname != "_":
+                raise VimLParserException(Err(viml_printf("E853: Duplicate argument name: %s", pname), varnode.pos))
+            named[pname] = 1
+            self.declared[pname] = 1
+            varnode.value = pname
+            if variadic:
+                varnode.value = "..." + pname
+            viml_add(node.rlist, varnode)
+            # Check for type annotation
+            if self.reader.peekn(1) == ":":
+                self.reader.getn(1)
                 self.reader.skip_white()
-                varnode.type_str = ""
-                # Check for ...name (variadic)
-                if self.reader.peekn(3) == "...":
-                    self.reader.getn(3)
-                    self.reader.skip_white()
-                    vname = self.reader.read_word()
-                    varnode.pos = self.reader.getpos()
-                    varnode.value = "..." + vname
-                    self.declared[vname] = 1
-                    # Optionally read type annotation
-                    self.reader.skip_white()
-                    if self.reader.peekn(1) == ":":
-                        self.reader.getn(1)
-                        self.reader.skip_white()
-                        varnode.type_str = self.read_type()
-                    viml_add(node.rlist, varnode)
-                    self.reader.skip_white()
-                    if self.reader.peekn(1) == ")":
-                        self.reader.getn(1)
-                        break
-                    else:
-                        raise VimLParserException(Err(viml_printf("E475: Invalid argument: %s", self.reader.peekn(1)), self.reader.getpos()))
-                npos = self.reader.getpos()
-                pname = self.reader.read_word()
-                if pname == "":
-                    if self.reader.peekn(1) == ")":
-                        self.reader.getn(1)
-                        break
-                    raise VimLParserException(Err(viml_printf("E475: Invalid argument: %s", self.reader.peekn(1)), self.reader.getpos()))
-                if viml_has_key(named, pname):
-                    raise VimLParserException(Err(viml_printf("E853: Duplicate argument name: %s", pname), npos))
-                named[pname] = 1
-                varnode.pos = npos
-                varnode.value = pname
-                viml_add(node.rlist, varnode)
-                self.declare(varnode)
-                # Check for type annotation
+                varnode.type_str = self.read_type()
+            # Check for default value
+            self.reader.skip_white()
+            if self.reader.peekn(1) == "=" and not variadic:
+                self.reader.getn(1)
                 self.reader.skip_white()
-                if self.reader.peekn(1) == ":":
-                    self.reader.getn(1)
-                    self.reader.skip_white()
-                    varnode.type_str = self.read_type()
-                # Check for default value
-                self.reader.skip_white()
-                if self.reader.peekn(1) == "=":
-                    self.reader.getn(1)
-                    self.reader.skip_white()
-                    viml_add(node.default_args, self.parse_expr())
-                elif viml_len(node.default_args) > 0:
-                    raise VimLParserException(Err("E989: Non-default argument follows default argument", varnode.pos))
-                self.reader.skip_white()
-                if self.reader.peekn(1) == ",":
-                    self.reader.getn(1)
-                    self.reader.skip_white()
-                    if self.reader.peekn(1) == ")":
-                        self.reader.getn(1)
-                        break
-                elif self.reader.peekn(1) == ")":
-                    self.reader.getn(1)
-                    break
-                else:
-                    raise VimLParserException(Err(viml_printf("E475: Invalid argument: %s", self.reader.peekn(1)), self.reader.getpos()))
+                viml_add(node.default_args, self.parse_expr())
+            elif viml_len(node.default_args) > 0 and not variadic:
+                raise VimLParserException(Err("E989: Non-default argument follows default argument", varnode.pos))
+            self.skip_vim9_white()
+            if self.reader.peekn(1) == ",":
+                self.reader.getn(1)
+            elif self.reader.peekn(1) != ")":
+                raise VimLParserException(Err(viml_printf("E475: Invalid argument: %s", self.reader.peekn(1)), self.reader.getpos()))
         # Check for return type annotation ': type'
         self.reader.skip_white()
         if self.reader.peekn(1) == ":":
             self.reader.getn(1)
             self.reader.skip_white()
             node.attr.return_type = self.read_type()
-        self.add_node(node)
-        self.push_context(node)
+
+    # Skip white space, comments and line breaks, e.g. in the argument list of a
+    # :def function.
+    def skip_vim9_white(self):
+        while TRUE:
+            self.reader.skip_white()
+            if self.reader.peek() == "#":
+                self.reader.getn(-1)
+            if self.reader.peek() != "<EOL>":
+                break
+            self.reader.get()
 
     def read_type(self):
         type_str = ""
@@ -5245,7 +5237,7 @@ class Compiler:
             self.out("(vim9script)")
 
     def compile_def(self, node):
-        left = self.compile(node.left)
+        left = self.compile(node.left) + node.attr.type_params
         rlist = [self.compile(vval) for vval in node.rlist]
         default_args = [self.compile(vval) for vval in node.default_args]
         if not viml_empty(rlist):

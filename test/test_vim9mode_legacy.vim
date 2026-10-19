@@ -12,3 +12,7 @@ function! LegacyFunc()
     let x = 2
   endtry
 endfunction
+" legacy script
+def Legacy(d: dict<any> = {key: 1}, n = 1 + 1)
+  echo d
+enddef
