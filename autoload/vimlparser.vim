@@ -170,6 +170,8 @@ let s:NODE_STATIC = 122
 let s:NODE_ABSTRACT = 123
 let s:NODE_FALSY = 124
 let s:NODE_INTERPOLATION = 125
+let s:NODE_DEFER = 126
+let s:NODE_ECHOWINDOW = 127
 
 let s:TOKEN_EOF = 1
 let s:TOKEN_EOL = 2
@@ -476,6 +478,8 @@ endfunction
 " ABSTRACT .ea .body
 " FALSY .left .right
 " INTERPOLATION .value
+" DEFER .ea .left
+" ECHOWINDOW .ea .list
 " TUPLE .value
 " CAST .type_str .left
 function! s:Node(type) abort
@@ -505,11 +509,16 @@ function! s:VimLParser.__init__(...) abort
   let self.vim9script = 0
   " TRUE while parsing the command after :abstract
   let self.abstract = s:FALSE
+  " Set by the :vim9cmd (1) and :legacy (0) modifiers for one command.
+  let self.vim9cmd = -1
 endfunction
 
 " Vim9 syntax applies inside :def functions, and in a Vim9 script outside of
 " legacy :function bodies.
 function! s:VimLParser.isvim9() abort
+  if self.vim9cmd !=# -1
+    return self.vim9cmd
+  endif
   for node in self.context
     if node.type ==# s:NODE_DEF || node.type ==# s:NODE_LAMBDA || node.type ==# s:NODE_CLASS || node.type ==# s:NODE_INTERFACE || node.type ==# s:NODE_ENUM
       return s:TRUE
@@ -619,6 +628,7 @@ endfunction
 
 function! s:VimLParser.parse_one_cmd() abort
   let self.ea = s:ExArg()
+  let self.vim9cmd = -1
 
   if self.reader.peekn(2) ==# '#!'
     call self.parse_hashbang()
@@ -653,6 +663,7 @@ function! s:VimLParser.parse_one_cmd() abort
   endif
   let self.ea.linepos = self.reader.getpos()
   call self.parse_command_modifiers()
+  let vim9 = self.isvim9()
   if vim9
     " In Vim9 script a range must be preceded by a colon, without it the line
     " may be an expression or assignment.
@@ -914,12 +925,21 @@ function! s:VimLParser.parse_command_modifiers() abort
       call self.reader.skip_white()
     endif
     let k = self.reader.read_alpha()
+    if k ==# 'vim' && self.reader.peekn(1) ==# '9'
+      let k .= self.reader.read_alnum()
+    endif
     let c = self.reader.peekn(1)
     call self.reader.skip_white()
     if self.isvim9() && (c ==# '(' || c ==# '[' || c ==# '.' || c ==# ':' || self.peek_assign_op() !=# '' || self.reader.peekn(2) ==# '->')
       " A Vim9 variable or function, not a modifier.
       call self.reader.seek_set(pos)
       break
+    elseif stridx('vim9cmd', k) ==# 0 && len(k) >= 4 " vim9\%[cmd]
+      call add(modifiers, {'name': 'vim9cmd'})
+      let self.vim9cmd = s:TRUE
+    elseif stridx('legacy', k) ==# 0 && len(k) >= 3 " leg\%[acy]
+      call add(modifiers, {'name': 'legacy'})
+      let self.vim9cmd = s:FALSE
     elseif stridx('aboveleft', k) ==# 0 && len(k) >= 3 " abo\%[veleft]
       call add(modifiers, {'name': 'aboveleft'})
     elseif stridx('belowright', k) ==# 0 && len(k) >= 3 " bel\%[owright]
@@ -1325,6 +1345,10 @@ function! s:VimLParser._parse_command(parser) abort
     call self.parse_cmd_public()
   elseif a:parser ==# 'parse_cmd_static'
     call self.parse_cmd_static()
+  elseif a:parser ==# 'parse_cmd_defer'
+    call self.parse_cmd_defer()
+  elseif a:parser ==# 'parse_cmd_echowindow'
+    call self.parse_cmd_echowindow()
   elseif a:parser ==# 'parse_cmd_block'
     call self.parse_cmd_block()
   elseif a:parser ==# 'parse_cmd_endblock'
@@ -2317,6 +2341,7 @@ endfunction
 " start of a line.  Only a comment may follow the "{".
 function! s:VimLParser.parse_lambda_block(node) abort
   let ea = self.ea
+  let vim9cmd = self.vim9cmd
   call self.reader.skip_white()
   if self.reader.peek() ==# '#'
     call self.reader.getn(-1)
@@ -2341,6 +2366,7 @@ function! s:VimLParser.parse_lambda_block(node) abort
   endwhile
   call self.pop_context()
   let self.ea = ea
+  let self.vim9cmd = vim9cmd
 endfunction
 
 function! s:VimLParser.parse_cmd_enddef() abort
@@ -3104,6 +3130,26 @@ function! s:VimLParser.parse_cmd_echoconsole() abort
   call self.add_node(node)
 endfunction
 
+function! s:VimLParser.parse_cmd_echowindow() abort
+  let node = s:Node(s:NODE_ECHOWINDOW)
+  let node.pos = self.ea.cmdpos
+  let node.ea = self.ea
+  let node.list = self.parse_exprlist()
+  call self.add_node(node)
+endfunction
+
+" :defer {func}({args})
+function! s:VimLParser.parse_cmd_defer() abort
+  let node = s:Node(s:NODE_DEFER)
+  let node.pos = self.ea.cmdpos
+  let node.ea = self.ea
+  let node.left = self.parse_expr()
+  if node.left.type !=# s:NODE_CALL
+    throw s:Err('E107: Missing parentheses', node.left.pos)
+  endif
+  call self.add_node(node)
+endfunction
+
 function! s:VimLParser.parse_cmd_execute() abort
   let node = s:Node(s:NODE_EXECUTE)
   let node.pos = self.ea.cmdpos
@@ -3452,7 +3498,7 @@ let s:VimLParser.builtin_commands = [
       \ {'name': 'debug', 'minlen': 3, 'flags': 'NEEDARG|EXTRA|NOTRLCOM|SBOXOK|CMDWIN|LOCK_OK', 'parser': 'parse_cmd_common'},
       \ {'name': 'debuggreedy', 'minlen': 6, 'flags': 'RANGE|ZEROR|TRLBAR|CMDWIN|LOCK_OK', 'parser': 'parse_cmd_common'},
       \ {'name': 'def', 'minlen': 3, 'flags': 'EXTRA|BANG|SBOXOK|CMDWIN|LOCK_OK', 'parser': 'parse_cmd_def'},
-      \ {'name': 'defer', 'minlen': 4, 'flags': 'NEEDARG|EXTRA|NOTRLCOM|EXPR_ARG|SBOXOK|CMDWIN|LOCK_OK', 'parser': 'parse_cmd_common'},
+      \ {'name': 'defer', 'minlen': 4, 'flags': 'NEEDARG|EXTRA|NOTRLCOM|EXPR_ARG|SBOXOK|CMDWIN|LOCK_OK', 'parser': 'parse_cmd_defer'},
       \ {'name': 'defcompile', 'minlen': 4, 'flags': 'SBOXOK|CMDWIN|LOCK_OK|TRLBAR', 'parser': 'parse_cmd_common'},
       \ {'name': 'delcommand', 'minlen': 4, 'flags': 'NEEDARG|WORD1|TRLBAR|CMDWIN|LOCK_OK', 'parser': 'parse_cmd_common'},
       \ {'name': 'delfunction', 'minlen': 4, 'flags': 'BANG|NEEDARG|WORD1|CMDWIN|LOCK_OK', 'parser': 'parse_cmd_delfunction'},
@@ -3480,7 +3526,7 @@ let s:VimLParser.builtin_commands = [
       \ {'name': 'echohl', 'minlen': 5, 'flags': 'EXTRA|TRLBAR|SBOXOK|CMDWIN|LOCK_OK', 'parser': 'parse_cmd_echohl'},
       \ {'name': 'echomsg', 'minlen': 5, 'flags': 'EXTRA|NOTRLCOM|EXPR_ARG|SBOXOK|CMDWIN|LOCK_OK', 'parser': 'parse_cmd_echomsg'},
       \ {'name': 'echoconsole', 'minlen': 5, 'flags': 'EXTRA|NOTRLCOM|EXPR_ARG|SBOXOK|CMDWIN|LOCK_OK', 'parser': 'parse_cmd_echoconsole'},
-      \ {'name': 'echowindow', 'minlen': 5, 'flags': 'EXTRA|NOTRLCOM|EXPR_ARG|SBOXOK|CMDWIN|LOCK_OK', 'parser': 'parse_cmd_common'},
+      \ {'name': 'echowindow', 'minlen': 5, 'flags': 'EXTRA|NOTRLCOM|EXPR_ARG|SBOXOK|CMDWIN|LOCK_OK', 'parser': 'parse_cmd_echowindow'},
       \ {'name': 'echon', 'minlen': 5, 'flags': 'EXTRA|NOTRLCOM|EXPR_ARG|SBOXOK|CMDWIN|LOCK_OK', 'parser': 'parse_cmd_echon'},
       \ {'name': 'else', 'minlen': 2, 'flags': 'TRLBAR|SBOXOK|CMDWIN|LOCK_OK', 'parser': 'parse_cmd_else'},
       \ {'name': 'elseif', 'minlen': 5, 'flags': 'EXTRA|NOTRLCOM|EXPR_ARG|SBOXOK|CMDWIN|LOCK_OK', 'parser': 'parse_cmd_elseif'},
@@ -6838,6 +6884,12 @@ function! s:Compiler.compile(node) abort
   elseif a:node.type ==# s:NODE_ABSTRACT
     call self.compile_wrapper(a:node, 'abstract')
     return s:NIL
+  elseif a:node.type ==# s:NODE_DEFER
+    call self.compile_defer(a:node)
+    return s:NIL
+  elseif a:node.type ==# s:NODE_ECHOWINDOW
+    call self.compile_echowindow(a:node)
+    return s:NIL
   elseif a:node.type ==# s:NODE_TUPLE
     return self.compile_tuple(a:node)
   elseif a:node.type ==# s:NODE_FALSY
@@ -7103,6 +7155,15 @@ endfunction
 function! s:Compiler.compile_echoconsole(node) abort
   let list = map(a:node.list, 'self.compile(v:val)')
   call self.out('(echoconsole %s)', join(list, ' '))
+endfunction
+
+function! s:Compiler.compile_echowindow(node) abort
+  let list = map(a:node.list, 'self.compile(v:val)')
+  call self.out('(echowindow %s)', join(list, ' '))
+endfunction
+
+function! s:Compiler.compile_defer(node) abort
+  call self.out('(defer %s)', self.compile(a:node.left))
 endfunction
 
 function! s:Compiler.compile_execute(node) abort
