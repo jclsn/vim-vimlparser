@@ -157,6 +157,17 @@ let s:NODE_CAST = 109
 let s:NODE_ASSIGN = 110
 let s:NODE_BLOCK = 111
 let s:NODE_ENDBLOCK = 112
+let s:NODE_CLASS = 113
+let s:NODE_ENDCLASS = 114
+let s:NODE_INTERFACE = 115
+let s:NODE_ENDINTERFACE = 116
+let s:NODE_ENUM = 117
+let s:NODE_ENDENUM = 118
+let s:NODE_ENUMVALUE = 119
+let s:NODE_TYPE = 120
+let s:NODE_PUBLIC = 121
+let s:NODE_STATIC = 122
+let s:NODE_ABSTRACT = 123
 
 let s:TOKEN_EOF = 1
 let s:TOKEN_EOL = 2
@@ -449,6 +460,17 @@ endfunction
 " ASSIGN .ea .op .left .list .rest .right
 " BLOCK .ea .body .endblock
 " ENDBLOCK .ea
+" CLASS .ea .name .extends .implements .body .endclass
+" ENDCLASS .ea
+" INTERFACE .ea .name .extends .body .endinterface
+" ENDINTERFACE .ea
+" ENUM .ea .name .implements .enumvalues .body .endenum
+" ENDENUM .ea
+" ENUMVALUE .value .rlist
+" TYPE .ea .name .type_str
+" PUBLIC .ea .body
+" STATIC .ea .body
+" ABSTRACT .ea .body
 " TUPLE .value
 " CAST .type_str .left
 function! s:Node(type) abort
@@ -476,13 +498,15 @@ function! s:VimLParser.__init__(...) abort
 
   let self.find_command_cache = {}
   let self.vim9script = 0
+  " TRUE while parsing the command after :abstract
+  let self.abstract = s:FALSE
 endfunction
 
 " Vim9 syntax applies inside :def functions, and in a Vim9 script outside of
 " legacy :function bodies.
 function! s:VimLParser.isvim9() abort
   for node in self.context
-    if node.type ==# s:NODE_DEF || node.type ==# s:NODE_LAMBDA
+    if node.type ==# s:NODE_DEF || node.type ==# s:NODE_LAMBDA || node.type ==# s:NODE_CLASS || node.type ==# s:NODE_INTERFACE || node.type ==# s:NODE_ENUM
       return s:TRUE
     elseif node.type ==# s:NODE_FUNCTION
       return s:FALSE
@@ -577,6 +601,12 @@ function! s:VimLParser.parse(reader) abort
   call self.check_missing_endfor('TOPLEVEL', self.reader.getpos())
   if self.context[0].type ==# s:NODE_BLOCK
     throw s:Err('E1026: Missing }', self.reader.getpos())
+  elseif self.context[0].type ==# s:NODE_CLASS
+    throw s:Err('E1101: Missing :endclass', self.reader.getpos())
+  elseif self.context[0].type ==# s:NODE_INTERFACE
+    throw s:Err('E1101: Missing :endinterface', self.reader.getpos())
+  elseif self.context[0].type ==# s:NODE_ENUM
+    throw s:Err('E1101: Missing :endenum', self.reader.getpos())
   endif
   call self.pop_context()
   return toplevel
@@ -610,6 +640,10 @@ function! s:VimLParser.parse_one_cmd() abort
   if self.isvim9() && self.reader.peekn(1) ==# '#'
     call self.parse_comment()
     call self.reader.get()
+    return
+  endif
+  if self.context[0].type ==# s:NODE_ENUM && !self.context[0].values_done && self.parse_enum_values()
+    call self.parse_trail()
     return
   endif
   let self.ea.linepos = self.reader.getpos()
@@ -1266,6 +1300,26 @@ function! s:VimLParser._parse_command(parser) abort
     call self.parse_cmd_export()
   elseif a:parser ==# 'parse_cmd_import'
     call self.parse_cmd_import()
+  elseif a:parser ==# 'parse_cmd_abstract'
+    call self.parse_cmd_abstract()
+  elseif a:parser ==# 'parse_cmd_class'
+    call self.parse_cmd_class()
+  elseif a:parser ==# 'parse_cmd_endclass'
+    call self.parse_cmd_endclass()
+  elseif a:parser ==# 'parse_cmd_interface'
+    call self.parse_cmd_interface()
+  elseif a:parser ==# 'parse_cmd_endinterface'
+    call self.parse_cmd_endinterface()
+  elseif a:parser ==# 'parse_cmd_enum'
+    call self.parse_cmd_enum()
+  elseif a:parser ==# 'parse_cmd_endenum'
+    call self.parse_cmd_endenum()
+  elseif a:parser ==# 'parse_cmd_type'
+    call self.parse_cmd_type()
+  elseif a:parser ==# 'parse_cmd_public'
+    call self.parse_cmd_public()
+  elseif a:parser ==# 'parse_cmd_static'
+    call self.parse_cmd_static()
   elseif a:parser ==# 'parse_cmd_block'
     call self.parse_cmd_block()
   elseif a:parser ==# 'parse_cmd_endblock'
@@ -2174,6 +2228,10 @@ function! s:VimLParser.parse_cmd_def() abort
     call self.reader.skip_white()
     let node.attr.return_type = self.read_type()
   endif
+  " A method in an interface and an abstract method have no body.
+  if self.abstract || self.context[1].type ==# s:NODE_INTERFACE
+    call self.pop_context()
+  endif
 endfunction
 
 " Skip white space, comments and line breaks, e.g. in the argument list of a
@@ -2386,8 +2444,28 @@ function! s:VimLParser.parse_vim9_decl_name() abort
 endfunction
 
 function! s:VimLParser.parse_cmd_export() abort
+  call self.parse_wrapper(s:NODE_EXPORT)
+endfunction
+
+function! s:VimLParser.parse_cmd_public() abort
+  call self.parse_wrapper(s:NODE_PUBLIC)
+endfunction
+
+function! s:VimLParser.parse_cmd_static() abort
+  call self.parse_wrapper(s:NODE_STATIC)
+endfunction
+
+function! s:VimLParser.parse_cmd_abstract() abort
+  let self.abstract = s:TRUE
+  call self.parse_wrapper(s:NODE_ABSTRACT)
+  let self.abstract = s:FALSE
+endfunction
+
+" Parse a command that applies to the following command, like :export
+" and :static.  The nodes of the following command go into the body.
+function! s:VimLParser.parse_wrapper(type) abort
   call self.reader.skip_white()
-  let export_pos = self.ea.cmdpos
+  let wrapper_pos = self.ea.cmdpos
   " Re-find the inner command
   let self.ea.cmdpos = self.reader.getpos()
   let self.ea.cmd = self.find_command()
@@ -2400,22 +2478,220 @@ function! s:VimLParser.parse_cmd_export() abort
   endif
   call self.reader.skip_white()
   let self.ea.argpos = self.reader.getpos()
-  let export_node = s:Node(s:NODE_EXPORT)
-  let export_node.pos = export_pos
-  let export_node.ea = self.ea
-  let export_node.body = []
+  let wrapper = s:Node(a:type)
+  let wrapper.pos = wrapper_pos
+  let wrapper.ea = self.ea
+  let wrapper.body = []
   " Remember current context body position
   let ctx = self.context[0]
   let before = len(ctx.body)
   " Parse the inner command
   call self._parse_command(self.ea.cmd.parser)
-  " Move newly-added nodes into export body
+  " Move newly-added nodes into the wrapper body
   while len(ctx.body) > before
     let moved_node = ctx.body[before]
     call remove(ctx.body, before)
-    call add(export_node.body, moved_node)
+    call add(wrapper.body, moved_node)
   endwhile
-  call add(ctx.body, export_node)
+  call add(ctx.body, wrapper)
+endfunction
+
+" :class {name} [extends {class}] [implements {interface}, ...]
+function! s:VimLParser.parse_cmd_class() abort
+  let node = s:Node(s:NODE_CLASS)
+  let node.pos = self.ea.cmdpos
+  let node.ea = self.ea
+  let node.name = self.read_class_name()
+  let node.extends = ''
+  let node.implements = []
+  let node.body = []
+  let node.endclass = s:NIL
+  while s:TRUE
+    call self.reader.skip_white()
+    let pos = self.reader.tell()
+    let key = self.reader.read_alpha()
+    if key ==# 'extends'
+      call self.reader.skip_white()
+      let node.extends = self.read_type()
+    elseif key ==# 'implements' || key ==# 'specifies'
+      let node.implements = self.read_type_list()
+    else
+      call self.reader.seek_set(pos)
+      break
+    endif
+  endwhile
+  call self.add_node(node)
+  call self.push_context(node)
+endfunction
+
+function! s:VimLParser.parse_cmd_endclass() abort
+  call self.parse_class_end(s:NODE_CLASS, 'E1316: Class can only be defined in Vim9 script')
+endfunction
+
+" :interface {name} [extends {interface}, ...]
+function! s:VimLParser.parse_cmd_interface() abort
+  let node = s:Node(s:NODE_INTERFACE)
+  let node.pos = self.ea.cmdpos
+  let node.ea = self.ea
+  let node.name = self.read_class_name()
+  let node.extends = []
+  let node.body = []
+  let node.endinterface = s:NIL
+  call self.reader.skip_white()
+  let pos = self.reader.tell()
+  if self.reader.read_alpha() ==# 'extends'
+    let node.extends = self.read_type_list()
+  else
+    call self.reader.seek_set(pos)
+  endif
+  call self.add_node(node)
+  call self.push_context(node)
+endfunction
+
+function! s:VimLParser.parse_cmd_endinterface() abort
+  call self.parse_class_end(s:NODE_INTERFACE, 'E1345: :endinterface without :interface')
+endfunction
+
+" :enum {name} [implements {interface}, ...]
+function! s:VimLParser.parse_cmd_enum() abort
+  let node = s:Node(s:NODE_ENUM)
+  let node.pos = self.ea.cmdpos
+  let node.ea = self.ea
+  let node.name = self.read_class_name()
+  let node.implements = []
+  let node.enumvalues = []
+  let node.body = []
+  let node.endenum = s:NIL
+  " The enum values come first.
+  let node.values_done = s:FALSE
+  call self.reader.skip_white()
+  let pos = self.reader.tell()
+  if self.reader.read_alpha() ==# 'implements'
+    let node.implements = self.read_type_list()
+  else
+    call self.reader.seek_set(pos)
+  endif
+  call self.add_node(node)
+  call self.push_context(node)
+endfunction
+
+function! s:VimLParser.parse_cmd_endenum() abort
+  call self.parse_class_end(s:NODE_ENUM, 'E1419: :endenum without :enum')
+endfunction
+
+" Parse the enum values at the start of an enum: "Name[(args)], ..."
+" Return FALSE when the line is not a list of values.
+function! s:VimLParser.parse_enum_values() abort
+  let enumnode = self.context[0]
+  let pos = self.reader.tell()
+  let word = self.reader.read_word()
+  let c = self.reader.peekn(1)
+  call self.reader.seek_set(pos)
+  if word ==# '' || word ==# 'var' || word ==# 'final' || word ==# 'const' || word ==# 'def'
+        \ || word ==# 'static' || word ==# 'public' || word ==# 'endenum'
+        \ || (c !=# '' && c !=# ',' && c !=# '(' && !s:iswhite(c))
+    let enumnode.values_done = s:TRUE
+    return s:FALSE
+  endif
+  while s:TRUE
+    call self.skip_vim9_white()
+    let node = s:Node(s:NODE_ENUMVALUE)
+    let node.pos = self.reader.getpos()
+    let node.value = self.reader.read_word()
+    let node.rlist = []
+    if self.reader.peekn(1) ==# '('
+      let p = s:ExprParser.new(self.reader, self)
+      call p.tokenizer.get()
+      let node.rlist = p.parse_rlist()
+    endif
+    call add(enumnode.enumvalues, node)
+    call self.reader.skip_white()
+    if self.reader.peekn(1) !=# ','
+      break
+    endif
+    call self.reader.getn(1)
+    call self.skip_vim9_white()
+    if self.reader.peek() ==# '<EOF>'
+      break
+    endif
+    let pos = self.reader.tell()
+    let word = self.reader.read_word()
+    call self.reader.seek_set(pos)
+    if word ==# 'endenum'
+      break
+    endif
+  endwhile
+  let enumnode.values_done = s:TRUE
+  return s:TRUE
+endfunction
+
+function! s:VimLParser.parse_class_end(type, msg) abort
+  call self.check_missing_endif(self.ea.cmd.name, self.ea.cmdpos)
+  call self.check_missing_endtry(self.ea.cmd.name, self.ea.cmdpos)
+  call self.check_missing_endwhile(self.ea.cmd.name, self.ea.cmdpos)
+  call self.check_missing_endfor(self.ea.cmd.name, self.ea.cmdpos)
+  call self.check_missing_enddef(self.ea.cmd.name, self.ea.cmdpos)
+  if self.context[0].type !=# a:type
+    throw s:Err(a:msg, self.ea.cmdpos)
+  endif
+  if a:type ==# s:NODE_CLASS
+    let node = s:Node(s:NODE_ENDCLASS)
+    let self.context[0].endclass = node
+  elseif a:type ==# s:NODE_INTERFACE
+    let node = s:Node(s:NODE_ENDINTERFACE)
+    let self.context[0].endinterface = node
+  else
+    let node = s:Node(s:NODE_ENDENUM)
+    let self.context[0].endenum = node
+  endif
+  let node.pos = self.ea.cmdpos
+  let node.ea = self.ea
+  call self.pop_context()
+endfunction
+
+" :type {name} = {type}
+function! s:VimLParser.parse_cmd_type() abort
+  if !self.isvim9()
+    call self.parse_cmd_common()
+    return
+  endif
+  let node = s:Node(s:NODE_TYPE)
+  let node.pos = self.ea.cmdpos
+  let node.ea = self.ea
+  let node.name = self.read_class_name()
+  call self.reader.skip_white()
+  if self.reader.getn(1) !=# '='
+    throw s:Err('E1403: Missing "=" in type alias', self.reader.getpos())
+  endif
+  call self.reader.skip_white()
+  let node.type_str = self.read_type()
+  let self.declared[node.name] = 1
+  call self.add_node(node)
+endfunction
+
+function! s:VimLParser.read_class_name() abort
+  call self.reader.skip_white()
+  let name = self.reader.read_word()
+  if name ==# ''
+    throw s:Err(printf('E475: Invalid argument: %s', self.reader.peekline()), self.reader.getpos())
+  endif
+  let self.declared[name] = 1
+  return name
+endfunction
+
+" A comma separated list of types, e.g. after "implements".
+function! s:VimLParser.read_type_list() abort
+  let list = []
+  while s:TRUE
+    call self.reader.skip_white()
+    call add(list, self.read_type())
+    call self.reader.skip_white()
+    if self.reader.peekn(1) !=# ','
+      break
+    endif
+    call self.reader.getn(1)
+  endwhile
+  return list
 endfunction
 
 " :import [autoload] {expr} [as {name}]
@@ -3058,7 +3334,7 @@ let s:VimLParser.builtin_commands = [
       \ {'name': 'abbreviate', 'minlen': 2, 'flags': 'EXTRA|TRLBAR|NOTRLCOM|CTRLV|CMDWIN|LOCK_OK', 'parser': 'parse_cmd_common'},
       \ {'name': 'abclear', 'minlen': 3, 'flags': 'EXTRA|TRLBAR|CMDWIN|LOCK_OK', 'parser': 'parse_cmd_common'},
       \ {'name': 'aboveleft', 'minlen': 3, 'flags': 'NEEDARG|EXTRA|NOTRLCOM', 'parser': 'parse_cmd_common'},
-      \ {'name': 'abstract', 'minlen': 3, 'flags': 'EXTRA|TRLBAR|CMDWIN|LOCK_OK', 'parser': 'parse_cmd_common'},
+      \ {'name': 'abstract', 'minlen': 3, 'flags': 'EXTRA|TRLBAR|CMDWIN|LOCK_OK', 'parser': 'parse_cmd_abstract'},
       \ {'name': 'all', 'minlen': 2, 'flags': 'BANG|RANGE|COUNT|TRLBAR', 'parser': 'parse_cmd_common'},
       \ {'name': 'amenu', 'minlen': 2, 'flags': 'RANGE|ZEROR|EXTRA|TRLBAR|NOTRLCOM|CTRLV|CMDWIN|LOCK_OK', 'parser': 'parse_cmd_common'},
       \ {'name': 'anoremenu', 'minlen': 2, 'flags': 'RANGE|ZEROR|EXTRA|TRLBAR|NOTRLCOM|CTRLV|CMDWIN|LOCK_OK', 'parser': 'parse_cmd_common'},
@@ -3134,7 +3410,7 @@ let s:VimLParser.builtin_commands = [
       \ {'name': 'chistory', 'minlen': 3, 'flags': 'RANGE|COUNT|TRLBAR', 'parser': 'parse_cmd_common'},
       \ {'name': 'clist', 'minlen': 2, 'flags': 'BANG|EXTRA|TRLBAR|CMDWIN|LOCK_OK', 'parser': 'parse_cmd_common'},
       \ {'name': 'clast', 'minlen': 3, 'flags': 'RANGE|COUNT|TRLBAR|BANG', 'parser': 'parse_cmd_common'},
-      \ {'name': 'class', 'minlen': 5, 'flags': 'EXTRA|TRLBAR|CMDWIN|LOCK_OK', 'parser': 'parse_cmd_common'},
+      \ {'name': 'class', 'minlen': 5, 'flags': 'EXTRA|TRLBAR|CMDWIN|LOCK_OK', 'parser': 'parse_cmd_class'},
       \ {'name': 'close', 'minlen': 3, 'flags': 'BANG|RANGE|COUNT|TRLBAR|CMDWIN|LOCK_OK', 'parser': 'parse_cmd_common'},
       \ {'name': 'clearjumps', 'minlen': 3, 'flags': 'TRLBAR|CMDWIN|LOCK_OK', 'parser': 'parse_cmd_common'},
       \ {'name': 'cmap', 'minlen': 2, 'flags': 'EXTRA|TRLBAR|NOTRLCOM|CTRLV|CMDWIN|LOCK_OK', 'parser': 'parse_cmd_common'},
@@ -3205,16 +3481,16 @@ let s:VimLParser.builtin_commands = [
       \ {'name': 'elseif', 'minlen': 5, 'flags': 'EXTRA|NOTRLCOM|EXPR_ARG|SBOXOK|CMDWIN|LOCK_OK', 'parser': 'parse_cmd_elseif'},
       \ {'name': 'emenu', 'minlen': 2, 'flags': 'NEEDARG|EXTRA|TRLBAR|NOTRLCOM|RANGE|CMDWIN|LOCK_OK', 'parser': 'parse_cmd_common'},
       \ {'name': 'endif', 'minlen': 2, 'flags': 'TRLBAR|SBOXOK|CMDWIN|LOCK_OK', 'parser': 'parse_cmd_endif'},
-      \ {'name': 'endinterface', 'minlen': 5, 'flags': 'EXTRA|TRLBAR|CMDWIN|LOCK_OK', 'parser': 'parse_cmd_common'},
-      \ {'name': 'endclass', 'minlen': 4, 'flags': 'EXTRA|TRLBAR|CMDWIN|LOCK_OK', 'parser': 'parse_cmd_common'},
+      \ {'name': 'endinterface', 'minlen': 5, 'flags': 'EXTRA|TRLBAR|CMDWIN|LOCK_OK', 'parser': 'parse_cmd_endinterface'},
+      \ {'name': 'endclass', 'minlen': 4, 'flags': 'EXTRA|TRLBAR|CMDWIN|LOCK_OK', 'parser': 'parse_cmd_endclass'},
       \ {'name': 'enddef', 'minlen': 4, 'flags': 'TRLBAR|CMDWIN|LOCK_OK', 'parser': 'parse_cmd_enddef'},
-      \ {'name': 'endenum', 'minlen': 4, 'flags': 'EXTRA|TRLBAR|CMDWIN|LOCK_OK', 'parser': 'parse_cmd_common'},
+      \ {'name': 'endenum', 'minlen': 4, 'flags': 'EXTRA|TRLBAR|CMDWIN|LOCK_OK', 'parser': 'parse_cmd_endenum'},
       \ {'name': 'endfunction', 'minlen': 4, 'flags': 'TRLBAR|CMDWIN|LOCK_OK', 'parser': 'parse_cmd_endfunction'},
       \ {'name': 'endfor', 'minlen': 5, 'flags': 'TRLBAR|SBOXOK|CMDWIN|LOCK_OK', 'parser': 'parse_cmd_endfor'},
       \ {'name': 'endtry', 'minlen': 4, 'flags': 'TRLBAR|SBOXOK|CMDWIN|LOCK_OK', 'parser': 'parse_cmd_endtry'},
       \ {'name': 'endwhile', 'minlen': 4, 'flags': 'TRLBAR|SBOXOK|CMDWIN|LOCK_OK', 'parser': 'parse_cmd_endwhile'},
       \ {'name': 'enew', 'minlen': 3, 'flags': 'BANG|TRLBAR', 'parser': 'parse_cmd_common'},
-      \ {'name': 'enum', 'minlen': 3, 'flags': 'EXTRA|TRLBAR|CMDWIN|LOCK_OK', 'parser': 'parse_cmd_common'},
+      \ {'name': 'enum', 'minlen': 3, 'flags': 'EXTRA|TRLBAR|CMDWIN|LOCK_OK', 'parser': 'parse_cmd_enum'},
       \ {'name': 'eval', 'minlen': 2, 'flags': 'EXTRA|NOTRLCOM|EXPR_ARG|SBOXOK|CMDWIN|LOCK_OK', 'parser': 'parse_cmd_eval'},
       \ {'name': 'ex', 'minlen': 2, 'flags': 'BANG|FILE1|CMDARG|ARGOPT|TRLBAR', 'parser': 'parse_cmd_common'},
       \ {'name': 'execute', 'minlen': 3, 'flags': 'EXTRA|NOTRLCOM|EXPR_ARG|SBOXOK|CMDWIN|LOCK_OK', 'parser': 'parse_cmd_execute'},
@@ -3268,7 +3544,7 @@ let s:VimLParser.builtin_commands = [
       \ {'name': 'inoreabbrev', 'minlen': 6, 'flags': 'EXTRA|TRLBAR|NOTRLCOM|CTRLV|CMDWIN|LOCK_OK', 'parser': 'parse_cmd_common'},
       \ {'name': 'inoremenu', 'minlen': 7, 'flags': 'RANGE|ZEROR|EXTRA|TRLBAR|NOTRLCOM|CTRLV|CMDWIN|LOCK_OK', 'parser': 'parse_cmd_common'},
       \ {'name': 'intro', 'minlen': 3, 'flags': 'TRLBAR|CMDWIN|LOCK_OK', 'parser': 'parse_cmd_common'},
-      \ {'name': 'interface', 'minlen': 4, 'flags': 'EXTRA|TRLBAR|CMDWIN|LOCK_OK', 'parser': 'parse_cmd_common'},
+      \ {'name': 'interface', 'minlen': 4, 'flags': 'EXTRA|TRLBAR|CMDWIN|LOCK_OK', 'parser': 'parse_cmd_interface'},
       \ {'name': 'isearch', 'minlen': 2, 'flags': 'BANG|RANGE|DFLALL|WHOLEFOLD|EXTRA|CMDWIN|LOCK_OK', 'parser': 'parse_cmd_common'},
       \ {'name': 'isplit', 'minlen': 3, 'flags': 'BANG|RANGE|DFLALL|WHOLEFOLD|EXTRA', 'parser': 'parse_cmd_common'},
       \ {'name': 'iunmap', 'minlen': 2, 'flags': 'EXTRA|TRLBAR|NOTRLCOM|CTRLV|CMDWIN|LOCK_OK', 'parser': 'parse_cmd_common'},
@@ -3420,6 +3696,7 @@ let s:VimLParser.builtin_commands = [
       \ {'name': 'ptprevious', 'minlen': 3, 'flags': 'RANGE|BANG|TRLBAR|ZEROR', 'parser': 'parse_cmd_common'},
       \ {'name': 'ptrewind', 'minlen': 3, 'flags': 'RANGE|BANG|TRLBAR|ZEROR', 'parser': 'parse_cmd_common'},
       \ {'name': 'ptselect', 'minlen': 3, 'flags': 'BANG|TRLBAR|WORD1', 'parser': 'parse_cmd_common'},
+      \ {'name': 'public', 'minlen': 3, 'flags': 'EXTRA|TRLBAR|CMDWIN|LOCK_OK', 'parser': 'parse_cmd_public'},
       \ {'name': 'put', 'minlen': 2, 'flags': 'RANGE|WHOLEFOLD|BANG|REGSTR|TRLBAR|ZEROR|CMDWIN|LOCK_OK|MODIFY', 'parser': 'parse_cmd_common'},
       \ {'name': 'pwd', 'minlen': 2, 'flags': 'TRLBAR|CMDWIN|LOCK_OK', 'parser': 'parse_cmd_common'},
       \ {'name': 'python', 'minlen': 2, 'flags': 'RANGE|EXTRA|NEEDARG|CMDWIN|LOCK_OK|RESTRICT', 'parser': 'parse_cmd_python'},
@@ -3512,7 +3789,7 @@ let s:VimLParser.builtin_commands = [
       \ {'name': 'startinsert', 'minlen': 4, 'flags': 'BANG|TRLBAR|CMDWIN|LOCK_OK', 'parser': 'parse_cmd_common'},
       \ {'name': 'startgreplace', 'minlen': 6, 'flags': 'BANG|TRLBAR|CMDWIN|LOCK_OK', 'parser': 'parse_cmd_common'},
       \ {'name': 'startreplace', 'minlen': 6, 'flags': 'BANG|TRLBAR|CMDWIN|LOCK_OK', 'parser': 'parse_cmd_common'},
-      \ {'name': 'static', 'minlen': 4, 'flags': 'EXTRA|TRLBAR|CMDWIN|LOCK_OK', 'parser': 'parse_cmd_common'},
+      \ {'name': 'static', 'minlen': 4, 'flags': 'EXTRA|TRLBAR|CMDWIN|LOCK_OK', 'parser': 'parse_cmd_static'},
       \ {'name': 'stopinsert', 'minlen': 5, 'flags': 'BANG|TRLBAR|CMDWIN|LOCK_OK', 'parser': 'parse_cmd_common'},
       \ {'name': 'stjump', 'minlen': 3, 'flags': 'BANG|TRLBAR|WORD1', 'parser': 'parse_cmd_common'},
       \ {'name': 'stselect', 'minlen': 3, 'flags': 'BANG|TRLBAR|WORD1', 'parser': 'parse_cmd_common'},
@@ -3571,7 +3848,7 @@ let s:VimLParser.builtin_commands = [
       \ {'name': 'tselect', 'minlen': 2, 'flags': 'BANG|TRLBAR|WORD1', 'parser': 'parse_cmd_common'},
       \ {'name': 'tunmenu', 'minlen': 2, 'flags': 'EXTRA|TRLBAR|NOTRLCOM|CTRLV|CMDWIN|LOCK_OK', 'parser': 'parse_cmd_common'},
       \ {'name': 'tunmap', 'minlen': 5, 'flags': 'EXTRA|TRLBAR|NOTRLCOM|CTRLV|CMDWIN|LOCK_OK', 'parser': 'parse_cmd_common'},
-      \ {'name': 'type', 'minlen': 2, 'flags': 'EXTRA|TRLBAR|CMDWIN|LOCK_OK', 'parser': 'parse_cmd_common'},
+      \ {'name': 'type', 'minlen': 2, 'flags': 'EXTRA|TRLBAR|CMDWIN|LOCK_OK', 'parser': 'parse_cmd_type'},
       \ {'name': 'undo', 'minlen': 1, 'flags': 'RANGE|COUNT|ZEROR|TRLBAR|CMDWIN|LOCK_OK', 'parser': 'parse_cmd_common'},
       \ {'name': 'undojoin', 'minlen': 5, 'flags': 'TRLBAR|CMDWIN|LOCK_OK', 'parser': 'parse_cmd_common'},
       \ {'name': 'undolist', 'minlen': 5, 'flags': 'TRLBAR|CMDWIN|LOCK_OK', 'parser': 'parse_cmd_common'},
@@ -6462,6 +6739,27 @@ function! s:Compiler.compile(node) abort
   elseif a:node.type ==# s:NODE_BLOCK
     call self.compile_block(a:node)
     return s:NIL
+  elseif a:node.type ==# s:NODE_CLASS
+    call self.compile_class(a:node)
+    return s:NIL
+  elseif a:node.type ==# s:NODE_INTERFACE
+    call self.compile_interface(a:node)
+    return s:NIL
+  elseif a:node.type ==# s:NODE_ENUM
+    call self.compile_enum(a:node)
+    return s:NIL
+  elseif a:node.type ==# s:NODE_TYPE
+    call self.compile_type(a:node)
+    return s:NIL
+  elseif a:node.type ==# s:NODE_PUBLIC
+    call self.compile_wrapper(a:node, 'public')
+    return s:NIL
+  elseif a:node.type ==# s:NODE_STATIC
+    call self.compile_wrapper(a:node, 'static')
+    return s:NIL
+  elseif a:node.type ==# s:NODE_ABSTRACT
+    call self.compile_wrapper(a:node, 'abstract')
+    return s:NIL
   elseif a:node.type ==# s:NODE_TUPLE
     return self.compile_tuple(a:node)
   elseif a:node.type ==# s:NODE_CAST
@@ -7136,11 +7434,66 @@ function! s:Compiler.compile_decl(node, cmd) abort
 endfunction
 
 function! s:Compiler.compile_export(node) abort
-  call self.out('(export')
+  call self.compile_wrapper(a:node, 'export')
+endfunction
+
+function! s:Compiler.compile_wrapper(node, name) abort
+  call self.out('(%s', a:name)
   call self.incindent('  ')
   call self.compile_body(a:node.body)
   call self.out(')')
   call self.decindent()
+endfunction
+
+function! s:Compiler.compile_class(node) abort
+  let s = a:node.name
+  if a:node.extends !=# ''
+    let s .= ' extends ' . a:node.extends
+  endif
+  if !empty(a:node.implements)
+    let s .= ' implements ' . join(a:node.implements, ', ')
+  endif
+  call self.out('(class %s', s)
+  call self.incindent('  ')
+  call self.compile_body(a:node.body)
+  call self.out(')')
+  call self.decindent()
+endfunction
+
+function! s:Compiler.compile_interface(node) abort
+  let s = a:node.name
+  if !empty(a:node.extends)
+    let s .= ' extends ' . join(a:node.extends, ', ')
+  endif
+  call self.out('(interface %s', s)
+  call self.incindent('  ')
+  call self.compile_body(a:node.body)
+  call self.out(')')
+  call self.decindent()
+endfunction
+
+function! s:Compiler.compile_enum(node) abort
+  let s = a:node.name
+  if !empty(a:node.implements)
+    let s .= ' implements ' . join(a:node.implements, ', ')
+  endif
+  call self.out('(enum %s', s)
+  call self.incindent('  ')
+  for value in a:node.enumvalues
+    let rlist = map(value.rlist, 'self.compile(v:val)')
+    if empty(rlist)
+      call self.out('(%s)', value.value)
+    else
+      call self.out('(%s %s)', value.value, join(rlist, ' '))
+    endif
+  endfor
+  call self.compile_body(a:node.body)
+  call self.out(')')
+  call self.decindent()
+endfunction
+
+function! s:Compiler.compile_type(node) abort
+  call self.out('(type %s %s)', a:node.name, a:node.type_str)
 endfunction
 
 function! s:Compiler.compile_import(node) abort
