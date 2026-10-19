@@ -405,6 +405,8 @@ var TOKEN_HEREDOC = 69;
 var TOKEN_LSHIFT = 70;
 var TOKEN_RSHIFT = 71;
 var MAX_FUNC_ARGS = 20;
+// Binary operators that continue a Vim9 expression from the previous line.
+var VIM9_CONTINUATION_OPS = {"+":1, "-":1, "*":1, "/":1, "%":1, "..":1, "||":1, "&&":1, "??":1, "?":1, ":":1, "<<":1, ">>":1, "==":1, "==?":1, "==#":1, "!=":1, "!=?":1, "!=#":1, ">=":1, ">=?":1, ">=#":1, "<=":1, "<=?":1, "<=#":1, "=~":1, "=~?":1, "=~#":1, "!~":1, "!~?":1, "!~#":1, ">":1, ">?":1, ">#":1, "<":1, "<?":1, "<#":1};
 function isalpha(c) {
     return viml_eqregh(c, "^[A-Za-z]$");
 }
@@ -2771,7 +2773,7 @@ VimLParser.prototype.parse_cmd_execute = function() {
 }
 
 VimLParser.prototype.parse_expr = function() {
-    return new ExprParser(this.reader).parse();
+    return new ExprParser(this.reader, this).parse();
 }
 
 VimLParser.prototype.parse_exprlist = function() {
@@ -2789,7 +2791,7 @@ VimLParser.prototype.parse_exprlist = function() {
 }
 
 VimLParser.prototype.parse_lvalue_func = function() {
-    var p = new LvalueParser(this.reader);
+    var p = new LvalueParser(this.reader, this);
     var node = p.parse();
     if (node.type == NODE_IDENTIFIER || node.type == NODE_CURLYNAME || node.type == NODE_SUBSCRIPT || node.type == NODE_DOT || node.type == NODE_OPTION || node.type == NODE_ENV || node.type == NODE_REG) {
         return node;
@@ -2799,7 +2801,7 @@ VimLParser.prototype.parse_lvalue_func = function() {
 
 // FIXME:
 VimLParser.prototype.parse_lvalue = function() {
-    var p = new LvalueParser(this.reader);
+    var p = new LvalueParser(this.reader, this);
     var node = p.parse();
     if (node.type == NODE_IDENTIFIER) {
         if (!isvarname(node.value)) {
@@ -2814,7 +2816,7 @@ VimLParser.prototype.parse_lvalue = function() {
 
 // TODO: merge with s:VimLParser.parse_lvalue()
 VimLParser.prototype.parse_constlvalue = function() {
-    var p = new LvalueParser(this.reader);
+    var p = new LvalueParser(this.reader, this);
     var node = p.parse();
     if (node.type == NODE_IDENTIFIER) {
         if (!isvarname(node.value)) {
@@ -2857,7 +2859,7 @@ VimLParser.prototype.parse_lvaluelist = function() {
 // FIXME:
 VimLParser.prototype.parse_letlhs = function() {
     var lhs = {"left":NIL, "list":NIL, "rest":NIL};
-    var tokenizer = new ExprTokenizer(this.reader);
+    var tokenizer = new ExprTokenizer(this.reader, this.isvim9());
     if (tokenizer.peek().type == TOKEN_SQOPEN) {
         tokenizer.get();
         lhs.list = [];
@@ -2896,7 +2898,7 @@ VimLParser.prototype.parse_letlhs = function() {
 // TODO: merge with s:VimLParser.parse_letlhs() ?
 VimLParser.prototype.parse_constlhs = function() {
     var lhs = {"left":NIL, "list":NIL, "rest":NIL};
-    var tokenizer = new ExprTokenizer(this.reader);
+    var tokenizer = new ExprTokenizer(this.reader, this.isvim9());
     if (tokenizer.peek().type == TOKEN_SQOPEN) {
         tokenizer.get();
         lhs.list = [];
@@ -3005,8 +3007,16 @@ VimLParser.prototype.builtin_commands = [{"name":"append", "minlen":1, "flags":"
 VimLParser.prototype.builtin_functions = [{"name":"abs", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"acos", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"add", "min_argc":2, "max_argc":2, "argtype":"FEARG_1"}, {"name":"and", "min_argc":2, "max_argc":2, "argtype":"FEARG_1"}, {"name":"append", "min_argc":2, "max_argc":2, "argtype":"FEARG_2"}, {"name":"appendbufline", "min_argc":3, "max_argc":3, "argtype":"FEARG_3"}, {"name":"argc", "min_argc":0, "max_argc":1, "argtype":"0"}, {"name":"argidx", "min_argc":0, "max_argc":0, "argtype":"0"}, {"name":"arglistid", "min_argc":0, "max_argc":2, "argtype":"0"}, {"name":"argv", "min_argc":0, "max_argc":2, "argtype":"0"}, {"name":"asin", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"assert_beeps", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"assert_equal", "min_argc":2, "max_argc":3, "argtype":"FEARG_2"}, {"name":"assert_equalfile", "min_argc":2, "max_argc":3, "argtype":"FEARG_1"}, {"name":"assert_exception", "min_argc":1, "max_argc":2, "argtype":"0"}, {"name":"assert_fails", "min_argc":1, "max_argc":5, "argtype":"FEARG_1"}, {"name":"assert_false", "min_argc":1, "max_argc":2, "argtype":"FEARG_1"}, {"name":"assert_inrange", "min_argc":3, "max_argc":4, "argtype":"FEARG_3"}, {"name":"assert_match", "min_argc":2, "max_argc":3, "argtype":"FEARG_2"}, {"name":"assert_nobeep", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"assert_notequal", "min_argc":2, "max_argc":3, "argtype":"FEARG_2"}, {"name":"assert_notmatch", "min_argc":2, "max_argc":3, "argtype":"FEARG_2"}, {"name":"assert_report", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"assert_true", "min_argc":1, "max_argc":2, "argtype":"FEARG_1"}, {"name":"atan", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"atan2", "min_argc":2, "max_argc":2, "argtype":"FEARG_1"}, {"name":"autocmd_add", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"autocmd_delete", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"autocmd_get", "min_argc":0, "max_argc":1, "argtype":"FEARG_1"}, {"name":"balloon_gettext", "min_argc":0, "max_argc":0, "argtype":"0"}, {"name":"balloon_show", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"balloon_split", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"blob2list", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"browse", "min_argc":4, "max_argc":4, "argtype":"0"}, {"name":"browsedir", "min_argc":2, "max_argc":2, "argtype":"0"}, {"name":"bufadd", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"bufexists", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"buffer_exists", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"buffer_name", "min_argc":0, "max_argc":1, "argtype":"FEARG_1"}, {"name":"buffer_number", "min_argc":0, "max_argc":1, "argtype":"FEARG_1"}, {"name":"buflisted", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"bufload", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"bufloaded", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"bufname", "min_argc":0, "max_argc":1, "argtype":"FEARG_1"}, {"name":"bufnr", "min_argc":0, "max_argc":2, "argtype":"FEARG_1"}, {"name":"bufwinid", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"bufwinnr", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"byte2line", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"byteidx", "min_argc":2, "max_argc":2, "argtype":"FEARG_1"}, {"name":"byteidxcomp", "min_argc":2, "max_argc":2, "argtype":"FEARG_1"}, {"name":"call", "min_argc":2, "max_argc":3, "argtype":"FEARG_1"}, {"name":"ceil", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"ch_canread", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"ch_close", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"ch_close_in", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"ch_evalexpr", "min_argc":2, "max_argc":3, "argtype":"FEARG_1"}, {"name":"ch_evalraw", "min_argc":2, "max_argc":3, "argtype":"FEARG_1"}, {"name":"ch_getbufnr", "min_argc":2, "max_argc":2, "argtype":"FEARG_1"}, {"name":"ch_getjob", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"ch_info", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"ch_log", "min_argc":1, "max_argc":2, "argtype":"FEARG_1"}, {"name":"ch_logfile", "min_argc":1, "max_argc":2, "argtype":"FEARG_1"}, {"name":"ch_open", "min_argc":1, "max_argc":2, "argtype":"FEARG_1"}, {"name":"ch_read", "min_argc":1, "max_argc":2, "argtype":"FEARG_1"}, {"name":"ch_readblob", "min_argc":1, "max_argc":2, "argtype":"FEARG_1"}, {"name":"ch_readraw", "min_argc":1, "max_argc":2, "argtype":"FEARG_1"}, {"name":"ch_sendexpr", "min_argc":2, "max_argc":3, "argtype":"FEARG_1"}, {"name":"ch_sendraw", "min_argc":2, "max_argc":3, "argtype":"FEARG_1"}, {"name":"ch_setoptions", "min_argc":2, "max_argc":2, "argtype":"FEARG_1"}, {"name":"ch_status", "min_argc":1, "max_argc":2, "argtype":"FEARG_1"}, {"name":"changenr", "min_argc":0, "max_argc":0, "argtype":"0"}, {"name":"char2nr", "min_argc":1, "max_argc":2, "argtype":"FEARG_1"}, {"name":"charclass", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"charcol", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"charidx", "min_argc":2, "max_argc":3, "argtype":"FEARG_1"}, {"name":"chdir", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"cindent", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"clearmatches", "min_argc":0, "max_argc":1, "argtype":"FEARG_1"}, {"name":"col", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"complete", "min_argc":2, "max_argc":2, "argtype":"FEARG_2"}, {"name":"complete_add", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"complete_check", "min_argc":0, "max_argc":0, "argtype":"0"}, {"name":"complete_info", "min_argc":0, "max_argc":1, "argtype":"FEARG_1"}, {"name":"confirm", "min_argc":1, "max_argc":4, "argtype":"FEARG_1"}, {"name":"copy", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"cos", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"cosh", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"count", "min_argc":2, "max_argc":4, "argtype":"FEARG_1"}, {"name":"cscope_connection", "min_argc":0, "max_argc":3, "argtype":"0"}, {"name":"cursor", "min_argc":1, "max_argc":3, "argtype":"FEARG_1"}, {"name":"debugbreak", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"deepcopy", "min_argc":1, "max_argc":2, "argtype":"FEARG_1"}, {"name":"delete", "min_argc":1, "max_argc":2, "argtype":"FEARG_1"}, {"name":"deletebufline", "min_argc":2, "max_argc":3, "argtype":"FEARG_1"}, {"name":"did_filetype", "min_argc":0, "max_argc":0, "argtype":"0"}, {"name":"diff_filler", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"diff_hlID", "min_argc":2, "max_argc":2, "argtype":"FEARG_1"}, {"name":"digraph_get", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"digraph_getlist", "min_argc":0, "max_argc":1, "argtype":"FEARG_1"}, {"name":"digraph_set", "min_argc":2, "max_argc":2, "argtype":"FEARG_1"}, {"name":"digraph_setlist", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"echoraw", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"empty", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"environ", "min_argc":0, "max_argc":0, "argtype":"0"}, {"name":"escape", "min_argc":2, "max_argc":2, "argtype":"FEARG_1"}, {"name":"eval", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"eventhandler", "min_argc":0, "max_argc":0, "argtype":"0"}, {"name":"executable", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"execute", "min_argc":1, "max_argc":2, "argtype":"FEARG_1"}, {"name":"exepath", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"exists", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"exists_compiled", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"exp", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"expand", "min_argc":1, "max_argc":3, "argtype":"FEARG_1"}, {"name":"expandcmd", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"extend", "min_argc":2, "max_argc":3, "argtype":"FEARG_1"}, {"name":"extendnew", "min_argc":2, "max_argc":3, "argtype":"FEARG_1"}, {"name":"feedkeys", "min_argc":1, "max_argc":2, "argtype":"FEARG_1"}, {"name":"file_readable", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"filereadable", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"filewritable", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"filter", "min_argc":2, "max_argc":2, "argtype":"FEARG_1"}, {"name":"finddir", "min_argc":1, "max_argc":3, "argtype":"FEARG_1"}, {"name":"findfile", "min_argc":1, "max_argc":3, "argtype":"FEARG_1"}, {"name":"flatten", "min_argc":1, "max_argc":2, "argtype":"FEARG_1"}, {"name":"flattennew", "min_argc":1, "max_argc":2, "argtype":"FEARG_1"}, {"name":"float2nr", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"floor", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"fmod", "min_argc":2, "max_argc":2, "argtype":"FEARG_1"}, {"name":"fnameescape", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"fnamemodify", "min_argc":2, "max_argc":2, "argtype":"FEARG_1"}, {"name":"foldclosed", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"foldclosedend", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"foldlevel", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"foldtext", "min_argc":0, "max_argc":0, "argtype":"0"}, {"name":"foldtextresult", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"foreground", "min_argc":0, "max_argc":0, "argtype":"0"}, {"name":"fullcommand", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"funcref", "min_argc":1, "max_argc":3, "argtype":"FEARG_1"}, {"name":"function", "min_argc":1, "max_argc":3, "argtype":"FEARG_1"}, {"name":"garbagecollect", "min_argc":0, "max_argc":1, "argtype":"0"}, {"name":"get", "min_argc":2, "max_argc":3, "argtype":"FEARG_1"}, {"name":"getbufinfo", "min_argc":0, "max_argc":1, "argtype":"FEARG_1"}, {"name":"getbufline", "min_argc":2, "max_argc":3, "argtype":"FEARG_1"}, {"name":"getbufvar", "min_argc":2, "max_argc":3, "argtype":"FEARG_1"}, {"name":"getchangelist", "min_argc":0, "max_argc":1, "argtype":"FEARG_1"}, {"name":"getchar", "min_argc":0, "max_argc":1, "argtype":"0"}, {"name":"getcharmod", "min_argc":0, "max_argc":0, "argtype":"0"}, {"name":"getcharpos", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"getcharsearch", "min_argc":0, "max_argc":0, "argtype":"0"}, {"name":"getcharstr", "min_argc":0, "max_argc":1, "argtype":"0"}, {"name":"getcmdcompltype", "min_argc":0, "max_argc":0, "argtype":"0"}, {"name":"getcmdline", "min_argc":0, "max_argc":0, "argtype":"0"}, {"name":"getcmdpos", "min_argc":0, "max_argc":0, "argtype":"0"}, {"name":"getcmdscreenpos", "min_argc":0, "max_argc":0, "argtype":"0"}, {"name":"getcmdtype", "min_argc":0, "max_argc":0, "argtype":"0"}, {"name":"getcmdwintype", "min_argc":0, "max_argc":0, "argtype":"0"}, {"name":"getcompletion", "min_argc":2, "max_argc":3, "argtype":"FEARG_1"}, {"name":"getcurpos", "min_argc":0, "max_argc":1, "argtype":"FEARG_1"}, {"name":"getcursorcharpos", "min_argc":0, "max_argc":1, "argtype":"FEARG_1"}, {"name":"getcwd", "min_argc":0, "max_argc":2, "argtype":"FEARG_1"}, {"name":"getenv", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"getfontname", "min_argc":0, "max_argc":1, "argtype":"0"}, {"name":"getfperm", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"getfsize", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"getftime", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"getftype", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"getimstatus", "min_argc":0, "max_argc":0, "argtype":"0"}, {"name":"getjumplist", "min_argc":0, "max_argc":2, "argtype":"FEARG_1"}, {"name":"getline", "min_argc":1, "max_argc":2, "argtype":"FEARG_1"}, {"name":"getloclist", "min_argc":1, "max_argc":2, "argtype":"0"}, {"name":"getmarklist", "min_argc":0, "max_argc":1, "argtype":"FEARG_1"}, {"name":"getmatches", "min_argc":0, "max_argc":1, "argtype":"0"}, {"name":"getmousepos", "min_argc":0, "max_argc":0, "argtype":"0"}, {"name":"getpid", "min_argc":0, "max_argc":0, "argtype":"0"}, {"name":"getpos", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"getqflist", "min_argc":0, "max_argc":1, "argtype":"0"}, {"name":"getreg", "min_argc":0, "max_argc":3, "argtype":"FEARG_1"}, {"name":"getreginfo", "min_argc":0, "max_argc":1, "argtype":"FEARG_1"}, {"name":"getregtype", "min_argc":0, "max_argc":1, "argtype":"FEARG_1"}, {"name":"getscriptinfo", "min_argc":0, "max_argc":1, "argtype":"0"}, {"name":"gettabinfo", "min_argc":0, "max_argc":1, "argtype":"FEARG_1"}, {"name":"gettabvar", "min_argc":2, "max_argc":3, "argtype":"FEARG_1"}, {"name":"gettabwinvar", "min_argc":3, "max_argc":4, "argtype":"FEARG_1"}, {"name":"gettagstack", "min_argc":0, "max_argc":1, "argtype":"FEARG_1"}, {"name":"gettext", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"getwininfo", "min_argc":0, "max_argc":1, "argtype":"FEARG_1"}, {"name":"getwinpos", "min_argc":0, "max_argc":1, "argtype":"FEARG_1"}, {"name":"getwinposx", "min_argc":0, "max_argc":0, "argtype":"0"}, {"name":"getwinposy", "min_argc":0, "max_argc":0, "argtype":"0"}, {"name":"getwinvar", "min_argc":2, "max_argc":3, "argtype":"FEARG_1"}, {"name":"glob", "min_argc":1, "max_argc":4, "argtype":"FEARG_1"}, {"name":"glob2regpat", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"globpath", "min_argc":2, "max_argc":5, "argtype":"FEARG_2"}, {"name":"has", "min_argc":1, "max_argc":2, "argtype":"0"}, {"name":"has_key", "min_argc":2, "max_argc":2, "argtype":"FEARG_1"}, {"name":"haslocaldir", "min_argc":0, "max_argc":2, "argtype":"FEARG_1"}, {"name":"hasmapto", "min_argc":1, "max_argc":3, "argtype":"FEARG_1"}, {"name":"highlightID", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"highlight_exists", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"histadd", "min_argc":2, "max_argc":2, "argtype":"FEARG_2"}, {"name":"histdel", "min_argc":1, "max_argc":2, "argtype":"FEARG_1"}, {"name":"histget", "min_argc":1, "max_argc":2, "argtype":"FEARG_1"}, {"name":"histnr", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"hlID", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"hlexists", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"hlget", "min_argc":0, "max_argc":2, "argtype":"FEARG_1"}, {"name":"hlset", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"hostname", "min_argc":0, "max_argc":0, "argtype":"0"}, {"name":"iconv", "min_argc":3, "max_argc":3, "argtype":"FEARG_1"}, {"name":"indent", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"index", "min_argc":2, "max_argc":4, "argtype":"FEARG_1"}, {"name":"indexof", "min_argc":2, "max_argc":3, "argtype":"FEARG_1"}, {"name":"input", "min_argc":1, "max_argc":3, "argtype":"FEARG_1"}, {"name":"inputdialog", "min_argc":1, "max_argc":3, "argtype":"FEARG_1"}, {"name":"inputlist", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"inputrestore", "min_argc":0, "max_argc":0, "argtype":"0"}, {"name":"inputsave", "min_argc":0, "max_argc":0, "argtype":"0"}, {"name":"inputsecret", "min_argc":1, "max_argc":2, "argtype":"FEARG_1"}, {"name":"insert", "min_argc":2, "max_argc":3, "argtype":"FEARG_1"}, {"name":"interrupt", "min_argc":0, "max_argc":0, "argtype":"0"}, {"name":"invert", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"isabsolutepath", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"isdirectory", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"isinf", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"islocked", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"isnan", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"items", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"job_getchannel", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"job_info", "min_argc":0, "max_argc":1, "argtype":"FEARG_1"}, {"name":"job_setoptions", "min_argc":2, "max_argc":2, "argtype":"FEARG_1"}, {"name":"job_start", "min_argc":1, "max_argc":2, "argtype":"FEARG_1"}, {"name":"job_status", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"job_stop", "min_argc":1, "max_argc":2, "argtype":"FEARG_1"}, {"name":"join", "min_argc":1, "max_argc":2, "argtype":"FEARG_1"}, {"name":"js_decode", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"js_encode", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"json_decode", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"json_encode", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"keys", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"last_buffer_nr", "min_argc":0, "max_argc":0, "argtype":"0"}, {"name":"len", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"libcall", "min_argc":3, "max_argc":3, "argtype":"FEARG_3"}, {"name":"libcallnr", "min_argc":3, "max_argc":3, "argtype":"FEARG_3"}, {"name":"line", "min_argc":1, "max_argc":2, "argtype":"FEARG_1"}, {"name":"line2byte", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"lispindent", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"list2blob", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"list2str", "min_argc":1, "max_argc":2, "argtype":"FEARG_1"}, {"name":"listener_add", "min_argc":1, "max_argc":2, "argtype":"FEARG_2"}, {"name":"listener_flush", "min_argc":0, "max_argc":1, "argtype":"FEARG_1"}, {"name":"listener_remove", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"localtime", "min_argc":0, "max_argc":0, "argtype":"0"}, {"name":"log", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"log10", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"luaeval", "min_argc":1, "max_argc":2, "argtype":"FEARG_1"}, {"name":"map", "min_argc":2, "max_argc":2, "argtype":"FEARG_1"}, {"name":"maparg", "min_argc":1, "max_argc":4, "argtype":"FEARG_1"}, {"name":"mapcheck", "min_argc":1, "max_argc":3, "argtype":"FEARG_1"}, {"name":"maplist", "min_argc":0, "max_argc":1, "argtype":"0"}, {"name":"mapnew", "min_argc":2, "max_argc":2, "argtype":"FEARG_1"}, {"name":"mapset", "min_argc":3, "max_argc":3, "argtype":"FEARG_1"}, {"name":"match", "min_argc":2, "max_argc":4, "argtype":"FEARG_1"}, {"name":"matchadd", "min_argc":2, "max_argc":5, "argtype":"FEARG_1"}, {"name":"matchaddpos", "min_argc":2, "max_argc":5, "argtype":"FEARG_1"}, {"name":"matcharg", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"matchdelete", "min_argc":1, "max_argc":2, "argtype":"FEARG_1"}, {"name":"matchend", "min_argc":2, "max_argc":4, "argtype":"FEARG_1"}, {"name":"matchfuzzy", "min_argc":2, "max_argc":3, "argtype":"FEARG_1"}, {"name":"matchfuzzypos", "min_argc":2, "max_argc":3, "argtype":"FEARG_1"}, {"name":"matchlist", "min_argc":2, "max_argc":4, "argtype":"FEARG_1"}, {"name":"matchstr", "min_argc":2, "max_argc":4, "argtype":"FEARG_1"}, {"name":"matchstrpos", "min_argc":2, "max_argc":4, "argtype":"FEARG_1"}, {"name":"max", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"menu_info", "min_argc":1, "max_argc":2, "argtype":"FEARG_1"}, {"name":"min", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"mkdir", "min_argc":1, "max_argc":3, "argtype":"FEARG_1"}, {"name":"mode", "min_argc":0, "max_argc":1, "argtype":"FEARG_1"}, {"name":"mzeval", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"nextnonblank", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"nr2char", "min_argc":1, "max_argc":2, "argtype":"FEARG_1"}, {"name":"or", "min_argc":2, "max_argc":2, "argtype":"FEARG_1"}, {"name":"pathshorten", "min_argc":1, "max_argc":2, "argtype":"FEARG_1"}, {"name":"perleval", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"popup_atcursor", "min_argc":2, "max_argc":2, "argtype":"FEARG_1"}, {"name":"popup_beval", "min_argc":2, "max_argc":2, "argtype":"FEARG_1"}, {"name":"popup_clear", "min_argc":0, "max_argc":1, "argtype":"0"}, {"name":"popup_close", "min_argc":1, "max_argc":2, "argtype":"FEARG_1"}, {"name":"popup_create", "min_argc":2, "max_argc":2, "argtype":"FEARG_1"}, {"name":"popup_dialog", "min_argc":2, "max_argc":2, "argtype":"FEARG_1"}, {"name":"popup_filter_menu", "min_argc":2, "max_argc":2, "argtype":"0"}, {"name":"popup_filter_yesno", "min_argc":2, "max_argc":2, "argtype":"0"}, {"name":"popup_findinfo", "min_argc":0, "max_argc":0, "argtype":"0"}, {"name":"popup_findpreview", "min_argc":0, "max_argc":0, "argtype":"0"}, {"name":"popup_getoptions", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"popup_getpos", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"popup_hide", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"popup_list", "min_argc":0, "max_argc":0, "argtype":"0"}, {"name":"popup_locate", "min_argc":2, "max_argc":2, "argtype":"0"}, {"name":"popup_menu", "min_argc":2, "max_argc":2, "argtype":"FEARG_1"}, {"name":"popup_move", "min_argc":2, "max_argc":2, "argtype":"FEARG_1"}, {"name":"popup_notification", "min_argc":2, "max_argc":2, "argtype":"FEARG_1"}, {"name":"popup_setoptions", "min_argc":2, "max_argc":2, "argtype":"FEARG_1"}, {"name":"popup_settext", "min_argc":2, "max_argc":2, "argtype":"FEARG_1"}, {"name":"popup_show", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"pow", "min_argc":2, "max_argc":2, "argtype":"FEARG_1"}, {"name":"prevnonblank", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"printf", "min_argc":1, "max_argc":19, "argtype":"FEARG_2"}, {"name":"prompt_getprompt", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"prompt_setcallback", "min_argc":2, "max_argc":2, "argtype":"FEARG_1"}, {"name":"prompt_setinterrupt", "min_argc":2, "max_argc":2, "argtype":"FEARG_1"}, {"name":"prompt_setprompt", "min_argc":2, "max_argc":2, "argtype":"FEARG_1"}, {"name":"prop_add", "min_argc":3, "max_argc":3, "argtype":"FEARG_1"}, {"name":"prop_add_list", "min_argc":2, "max_argc":2, "argtype":"FEARG_1"}, {"name":"prop_clear", "min_argc":1, "max_argc":3, "argtype":"FEARG_1"}, {"name":"prop_find", "min_argc":1, "max_argc":2, "argtype":"FEARG_1"}, {"name":"prop_list", "min_argc":1, "max_argc":2, "argtype":"FEARG_1"}, {"name":"prop_remove", "min_argc":1, "max_argc":3, "argtype":"FEARG_1"}, {"name":"prop_type_add", "min_argc":2, "max_argc":2, "argtype":"FEARG_1"}, {"name":"prop_type_change", "min_argc":2, "max_argc":2, "argtype":"FEARG_1"}, {"name":"prop_type_delete", "min_argc":1, "max_argc":2, "argtype":"FEARG_1"}, {"name":"prop_type_get", "min_argc":1, "max_argc":2, "argtype":"FEARG_1"}, {"name":"prop_type_list", "min_argc":0, "max_argc":1, "argtype":"FEARG_1"}, {"name":"pum_getpos", "min_argc":0, "max_argc":0, "argtype":"0"}, {"name":"pumvisible", "min_argc":0, "max_argc":0, "argtype":"0"}, {"name":"py3eval", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"pyeval", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"pyxeval", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"rand", "min_argc":0, "max_argc":1, "argtype":"FEARG_1"}, {"name":"range", "min_argc":1, "max_argc":3, "argtype":"FEARG_1"}, {"name":"readblob", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"readdir", "min_argc":1, "max_argc":3, "argtype":"FEARG_1"}, {"name":"readdirex", "min_argc":1, "max_argc":3, "argtype":"FEARG_1"}, {"name":"readfile", "min_argc":1, "max_argc":3, "argtype":"FEARG_1"}, {"name":"reduce", "min_argc":2, "max_argc":3, "argtype":"FEARG_1"}, {"name":"reg_executing", "min_argc":0, "max_argc":0, "argtype":"0"}, {"name":"reg_recording", "min_argc":0, "max_argc":0, "argtype":"0"}, {"name":"reltime", "min_argc":0, "max_argc":2, "argtype":"FEARG_1"}, {"name":"reltimefloat", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"reltimestr", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"remote_expr", "min_argc":2, "max_argc":4, "argtype":"FEARG_1"}, {"name":"remote_foreground", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"remote_peek", "min_argc":1, "max_argc":2, "argtype":"FEARG_1"}, {"name":"remote_read", "min_argc":1, "max_argc":2, "argtype":"FEARG_1"}, {"name":"remote_send", "min_argc":2, "max_argc":3, "argtype":"FEARG_1"}, {"name":"remote_startserver", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"remove", "min_argc":2, "max_argc":3, "argtype":"FEARG_1"}, {"name":"rename", "min_argc":2, "max_argc":2, "argtype":"FEARG_1"}, {"name":"repeat", "min_argc":2, "max_argc":2, "argtype":"FEARG_1"}, {"name":"resolve", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"reverse", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"round", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"rubyeval", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"screenattr", "min_argc":2, "max_argc":2, "argtype":"FEARG_1"}, {"name":"screenchar", "min_argc":2, "max_argc":2, "argtype":"FEARG_1"}, {"name":"screenchars", "min_argc":2, "max_argc":2, "argtype":"FEARG_1"}, {"name":"screencol", "min_argc":0, "max_argc":0, "argtype":"0"}, {"name":"screenpos", "min_argc":3, "max_argc":3, "argtype":"FEARG_1"}, {"name":"screenrow", "min_argc":0, "max_argc":0, "argtype":"0"}, {"name":"screenstring", "min_argc":2, "max_argc":2, "argtype":"FEARG_1"}, {"name":"search", "min_argc":1, "max_argc":5, "argtype":"FEARG_1"}, {"name":"searchcount", "min_argc":0, "max_argc":1, "argtype":"FEARG_1"}, {"name":"searchdecl", "min_argc":1, "max_argc":3, "argtype":"FEARG_1"}, {"name":"searchpair", "min_argc":3, "max_argc":7, "argtype":"0"}, {"name":"searchpairpos", "min_argc":3, "max_argc":7, "argtype":"0"}, {"name":"searchpos", "min_argc":1, "max_argc":5, "argtype":"FEARG_1"}, {"name":"server2client", "min_argc":2, "max_argc":2, "argtype":"FEARG_1"}, {"name":"serverlist", "min_argc":0, "max_argc":0, "argtype":"0"}, {"name":"setbufline", "min_argc":3, "max_argc":3, "argtype":"FEARG_3"}, {"name":"setbufvar", "min_argc":3, "max_argc":3, "argtype":"FEARG_3"}, {"name":"setcellwidths", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"setcharpos", "min_argc":2, "max_argc":2, "argtype":"FEARG_2"}, {"name":"setcharsearch", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"setcmdline", "min_argc":1, "max_argc":2, "argtype":"FEARG_1"}, {"name":"setcmdpos", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"setcursorcharpos", "min_argc":1, "max_argc":3, "argtype":"FEARG_1"}, {"name":"setenv", "min_argc":2, "max_argc":2, "argtype":"FEARG_2"}, {"name":"setfperm", "min_argc":2, "max_argc":2, "argtype":"FEARG_1"}, {"name":"setline", "min_argc":2, "max_argc":2, "argtype":"FEARG_2"}, {"name":"setloclist", "min_argc":2, "max_argc":4, "argtype":"FEARG_2"}, {"name":"setmatches", "min_argc":1, "max_argc":2, "argtype":"FEARG_1"}, {"name":"setpos", "min_argc":2, "max_argc":2, "argtype":"FEARG_2"}, {"name":"setqflist", "min_argc":1, "max_argc":3, "argtype":"FEARG_1"}, {"name":"setreg", "min_argc":2, "max_argc":3, "argtype":"FEARG_2"}, {"name":"settabvar", "min_argc":3, "max_argc":3, "argtype":"FEARG_3"}, {"name":"settabwinvar", "min_argc":4, "max_argc":4, "argtype":"FEARG_4"}, {"name":"settagstack", "min_argc":2, "max_argc":3, "argtype":"FEARG_2"}, {"name":"setwinvar", "min_argc":3, "max_argc":3, "argtype":"FEARG_3"}, {"name":"sha256", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"shellescape", "min_argc":1, "max_argc":2, "argtype":"FEARG_1"}, {"name":"shiftwidth", "min_argc":0, "max_argc":1, "argtype":"FEARG_1"}, {"name":"sign_define", "min_argc":1, "max_argc":2, "argtype":"FEARG_1"}, {"name":"sign_getdefined", "min_argc":0, "max_argc":1, "argtype":"FEARG_1"}, {"name":"sign_getplaced", "min_argc":0, "max_argc":2, "argtype":"FEARG_1"}, {"name":"sign_jump", "min_argc":3, "max_argc":3, "argtype":"FEARG_1"}, {"name":"sign_place", "min_argc":4, "max_argc":5, "argtype":"FEARG_1"}, {"name":"sign_placelist", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"sign_undefine", "min_argc":0, "max_argc":1, "argtype":"FEARG_1"}, {"name":"sign_unplace", "min_argc":1, "max_argc":2, "argtype":"FEARG_1"}, {"name":"sign_unplacelist", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"simplify", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"sin", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"sinh", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"slice", "min_argc":2, "max_argc":3, "argtype":"FEARG_1"}, {"name":"sort", "min_argc":1, "max_argc":3, "argtype":"FEARG_1"}, {"name":"sound_clear", "min_argc":0, "max_argc":0, "argtype":"0"}, {"name":"sound_playevent", "min_argc":1, "max_argc":2, "argtype":"FEARG_1"}, {"name":"sound_playfile", "min_argc":1, "max_argc":2, "argtype":"FEARG_1"}, {"name":"sound_stop", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"soundfold", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"spellbadword", "min_argc":0, "max_argc":1, "argtype":"FEARG_1"}, {"name":"spellsuggest", "min_argc":1, "max_argc":3, "argtype":"FEARG_1"}, {"name":"split", "min_argc":1, "max_argc":3, "argtype":"FEARG_1"}, {"name":"sqrt", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"srand", "min_argc":0, "max_argc":1, "argtype":"FEARG_1"}, {"name":"state", "min_argc":0, "max_argc":1, "argtype":"FEARG_1"}, {"name":"str2float", "min_argc":1, "max_argc":2, "argtype":"FEARG_1"}, {"name":"str2list", "min_argc":1, "max_argc":2, "argtype":"FEARG_1"}, {"name":"str2nr", "min_argc":1, "max_argc":3, "argtype":"FEARG_1"}, {"name":"strcharlen", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"strcharpart", "min_argc":2, "max_argc":4, "argtype":"FEARG_1"}, {"name":"strchars", "min_argc":1, "max_argc":2, "argtype":"FEARG_1"}, {"name":"strdisplaywidth", "min_argc":1, "max_argc":2, "argtype":"FEARG_1"}, {"name":"strftime", "min_argc":1, "max_argc":2, "argtype":"FEARG_1"}, {"name":"strgetchar", "min_argc":2, "max_argc":2, "argtype":"FEARG_1"}, {"name":"stridx", "min_argc":2, "max_argc":3, "argtype":"FEARG_1"}, {"name":"string", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"strlen", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"strpart", "min_argc":2, "max_argc":4, "argtype":"FEARG_1"}, {"name":"strptime", "min_argc":2, "max_argc":2, "argtype":"FEARG_1"}, {"name":"strridx", "min_argc":2, "max_argc":3, "argtype":"FEARG_1"}, {"name":"strtrans", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"strwidth", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"submatch", "min_argc":1, "max_argc":2, "argtype":"FEARG_1"}, {"name":"substitute", "min_argc":4, "max_argc":4, "argtype":"FEARG_1"}, {"name":"swapinfo", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"swapname", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"synID", "min_argc":3, "max_argc":3, "argtype":"0"}, {"name":"synIDattr", "min_argc":2, "max_argc":3, "argtype":"FEARG_1"}, {"name":"synIDtrans", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"synconcealed", "min_argc":2, "max_argc":2, "argtype":"0"}, {"name":"synstack", "min_argc":2, "max_argc":2, "argtype":"0"}, {"name":"system", "min_argc":1, "max_argc":2, "argtype":"FEARG_1"}, {"name":"systemlist", "min_argc":1, "max_argc":2, "argtype":"FEARG_1"}, {"name":"tabpagebuflist", "min_argc":0, "max_argc":1, "argtype":"FEARG_1"}, {"name":"tabpagenr", "min_argc":0, "max_argc":1, "argtype":"0"}, {"name":"tabpagewinnr", "min_argc":1, "max_argc":2, "argtype":"FEARG_1"}, {"name":"tagfiles", "min_argc":0, "max_argc":0, "argtype":"0"}, {"name":"taglist", "min_argc":1, "max_argc":2, "argtype":"FEARG_1"}, {"name":"tan", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"tanh", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"tempname", "min_argc":0, "max_argc":0, "argtype":"0"}, {"name":"term_dumpdiff", "min_argc":2, "max_argc":3, "argtype":"FEARG_1"}, {"name":"term_dumpload", "min_argc":1, "max_argc":2, "argtype":"FEARG_1"}, {"name":"term_dumpwrite", "min_argc":2, "max_argc":3, "argtype":"FEARG_2"}, {"name":"term_getaltscreen", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"term_getansicolors", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"term_getattr", "min_argc":2, "max_argc":2, "argtype":"FEARG_1"}, {"name":"term_getcursor", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"term_getjob", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"term_getline", "min_argc":2, "max_argc":2, "argtype":"FEARG_1"}, {"name":"term_getscrolled", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"term_getsize", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"term_getstatus", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"term_gettitle", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"term_gettty", "min_argc":1, "max_argc":2, "argtype":"FEARG_1"}, {"name":"term_list", "min_argc":0, "max_argc":0, "argtype":"0"}, {"name":"term_scrape", "min_argc":2, "max_argc":2, "argtype":"FEARG_1"}, {"name":"term_sendkeys", "min_argc":2, "max_argc":2, "argtype":"FEARG_1"}, {"name":"term_setansicolors", "min_argc":2, "max_argc":2, "argtype":"FEARG_1"}, {"name":"term_setapi", "min_argc":2, "max_argc":2, "argtype":"FEARG_1"}, {"name":"term_setkill", "min_argc":2, "max_argc":2, "argtype":"FEARG_1"}, {"name":"term_setrestore", "min_argc":2, "max_argc":2, "argtype":"FEARG_1"}, {"name":"term_setsize", "min_argc":3, "max_argc":3, "argtype":"FEARG_1"}, {"name":"term_start", "min_argc":1, "max_argc":2, "argtype":"FEARG_1"}, {"name":"term_wait", "min_argc":1, "max_argc":2, "argtype":"FEARG_1"}, {"name":"terminalprops", "min_argc":0, "max_argc":0, "argtype":"0"}, {"name":"test_alloc_fail", "min_argc":3, "max_argc":3, "argtype":"FEARG_1"}, {"name":"test_autochdir", "min_argc":0, "max_argc":0, "argtype":"0"}, {"name":"test_feedinput", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"test_garbagecollect_now", "min_argc":0, "max_argc":0, "argtype":"0"}, {"name":"test_garbagecollect_soon", "min_argc":0, "max_argc":0, "argtype":"0"}, {"name":"test_getvalue", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"test_gui_drop_files", "min_argc":4, "max_argc":4, "argtype":"0"}, {"name":"test_gui_event", "min_argc":2, "max_argc":2, "argtype":"FEARG_1"}, {"name":"test_gui_mouse_event", "min_argc":5, "max_argc":5, "argtype":"0"}, {"name":"test_ignore_error", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"test_null_blob", "min_argc":0, "max_argc":0, "argtype":"0"}, {"name":"test_null_channel", "min_argc":0, "max_argc":0, "argtype":"0"}, {"name":"test_null_dict", "min_argc":0, "max_argc":0, "argtype":"0"}, {"name":"test_null_function", "min_argc":0, "max_argc":0, "argtype":"0"}, {"name":"test_null_job", "min_argc":0, "max_argc":0, "argtype":"0"}, {"name":"test_null_list", "min_argc":0, "max_argc":0, "argtype":"0"}, {"name":"test_null_partial", "min_argc":0, "max_argc":0, "argtype":"0"}, {"name":"test_null_string", "min_argc":0, "max_argc":0, "argtype":"0"}, {"name":"test_option_not_set", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"test_override", "min_argc":2, "max_argc":2, "argtype":"FEARG_2"}, {"name":"test_refcount", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"test_scrollbar", "min_argc":3, "max_argc":3, "argtype":"FEARG_2"}, {"name":"test_setmouse", "min_argc":2, "max_argc":2, "argtype":"0"}, {"name":"test_settime", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"test_srand_seed", "min_argc":0, "max_argc":1, "argtype":"FEARG_1"}, {"name":"test_unknown", "min_argc":0, "max_argc":0, "argtype":"0"}, {"name":"test_void", "min_argc":0, "max_argc":0, "argtype":"0"}, {"name":"timer_info", "min_argc":0, "max_argc":1, "argtype":"FEARG_1"}, {"name":"timer_pause", "min_argc":2, "max_argc":2, "argtype":"FEARG_1"}, {"name":"timer_start", "min_argc":2, "max_argc":3, "argtype":"FEARG_1"}, {"name":"timer_stop", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"timer_stopall", "min_argc":0, "max_argc":0, "argtype":"0"}, {"name":"tolower", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"toupper", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"tr", "min_argc":3, "max_argc":3, "argtype":"FEARG_1"}, {"name":"trim", "min_argc":1, "max_argc":3, "argtype":"FEARG_1"}, {"name":"trunc", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"type", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"typename", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"undofile", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"undotree", "min_argc":0, "max_argc":0, "argtype":"0"}, {"name":"uniq", "min_argc":1, "max_argc":3, "argtype":"FEARG_1"}, {"name":"values", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"virtcol", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"virtcol2col", "min_argc":3, "max_argc":3, "argtype":"FEARG_1"}, {"name":"visualmode", "min_argc":0, "max_argc":1, "argtype":"0"}, {"name":"wildmenumode", "min_argc":0, "max_argc":0, "argtype":"0"}, {"name":"win_execute", "min_argc":2, "max_argc":3, "argtype":"FEARG_2"}, {"name":"win_findbuf", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"win_getid", "min_argc":0, "max_argc":2, "argtype":"FEARG_1"}, {"name":"win_gettype", "min_argc":0, "max_argc":1, "argtype":"FEARG_1"}, {"name":"win_gotoid", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"win_id2tabwin", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"win_id2win", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"win_move_separator", "min_argc":2, "max_argc":2, "argtype":"FEARG_1"}, {"name":"win_move_statusline", "min_argc":2, "max_argc":2, "argtype":"FEARG_1"}, {"name":"win_screenpos", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"win_splitmove", "min_argc":2, "max_argc":3, "argtype":"FEARG_1"}, {"name":"winbufnr", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"wincol", "min_argc":0, "max_argc":0, "argtype":"0"}, {"name":"windowsversion", "min_argc":0, "max_argc":0, "argtype":"0"}, {"name":"winheight", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"winlayout", "min_argc":0, "max_argc":1, "argtype":"FEARG_1"}, {"name":"winline", "min_argc":0, "max_argc":0, "argtype":"0"}, {"name":"winnr", "min_argc":0, "max_argc":1, "argtype":"FEARG_1"}, {"name":"winrestcmd", "min_argc":0, "max_argc":0, "argtype":"0"}, {"name":"winrestview", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"winsaveview", "min_argc":0, "max_argc":0, "argtype":"0"}, {"name":"winwidth", "min_argc":1, "max_argc":1, "argtype":"FEARG_1"}, {"name":"wordcount", "min_argc":0, "max_argc":0, "argtype":"0"}, {"name":"writefile", "min_argc":2, "max_argc":3, "argtype":"FEARG_1"}, {"name":"xor", "min_argc":2, "max_argc":2, "argtype":"FEARG_1"}];
 function ExprTokenizer() { this.__init__.apply(this, arguments); }
 ExprTokenizer.prototype.__init__ = function(reader) {
+    var a000 = Array.prototype.slice.call(arguments, 1);
     this.reader = reader;
     this.cache = {};
+    this.vim9 = FALSE;
+    if (viml_len(a000) > 0) {
+        this.vim9 = a000[0];
+    }
+    // Nesting level of brackets, inside which a Vim9 expression may continue
+    // on the next line.
+    this.depth = 0;
 }
 
 ExprTokenizer.prototype.token = function(type, value, pos) {
@@ -3021,6 +3031,9 @@ ExprTokenizer.prototype.peek = function() {
 }
 
 ExprTokenizer.prototype.get = function() {
+    if (this.vim9) {
+        this.skip_vim9_newline(FALSE);
+    }
     // FIXME: remove dirty hack
     if (viml_has_key(this.cache, this.reader.tell())) {
         var x = this.cache[this.reader.tell()];
@@ -3032,6 +3045,69 @@ ExprTokenizer.prototype.get = function() {
     var r = this.get2();
     this.cache[pos] = [this.reader.tell(), r];
     return r;
+}
+
+// In Vim9 script an expression continues on the next line inside brackets,
+// after an operator (a:force), and before an operator that starts the next
+// line.  Comments and empty lines in between are skipped.
+ExprTokenizer.prototype.skip_vim9_newline = function(force) {
+    var r = this.reader;
+    var force = force;
+    while (TRUE) {
+        var pos = r.tell();
+        r.skip_white();
+        if (r.peek() == "#" && r.tell() > 0 && (iswhite(r.p(-1)) || r.p(-1) == "<EOL>")) {
+            r.getn(-1);
+        }
+        if (r.peek() != "<EOL>" || !(force || this.depth > 0 || this.next_line_continues())) {
+            r.seek_set(pos);
+            return;
+        }
+        r.get();
+        var force = TRUE;
+    }
+}
+
+// Return TRUE when the next line, ignoring comments and empty lines, starts
+// with an operator that continues the expression.
+ExprTokenizer.prototype.next_line_continues = function() {
+    var r = this.reader;
+    var pos = r.tell();
+    while (r.peek() == "<EOL>") {
+        r.get();
+        r.skip_white();
+        if (r.peek() == "#") {
+            r.getn(-1);
+        }
+    }
+    var c = r.peek();
+    var continues = FALSE;
+    if (c == "-" && r.p(1) == ">") {
+        var continues = TRUE;
+    }
+    else if (c == "." && iswordc1(r.p(1))) {
+        var continues = TRUE;
+    }
+    else if (c == "i" && r.p(1) == "s") {
+        var op = r.read_alpha();
+        if (op == "is" || op == "isnot") {
+            if (r.peek() == "?" || r.peek() == "#") {
+                r.get();
+            }
+            var continues = iswhite(r.peek()) || r.peek() == "<EOL>";
+        }
+    }
+    else if (c != "<EOF>" && viml_stridx("+-*/%.|&?:=!<>", c) != -1) {
+        var op = "";
+        while (r.peek() != "<EOF>" && viml_stridx("+-*/%.|&?:=!<>~#", r.peek()) != -1) {
+            op += r.get();
+        }
+        if (viml_has_key(VIM9_CONTINUATION_OPS, op)) {
+            var continues = iswhite(r.peek()) || r.peek() == "<EOL>";
+        }
+    }
+    r.seek_set(pos);
+    return continues;
 }
 
 ExprTokenizer.prototype.get2 = function() {
@@ -3105,7 +3181,12 @@ ExprTokenizer.prototype.get2 = function() {
         }
     }
     else if (isnamec1(c)) {
-        var s = r.read_name();
+        if (this.vim9) {
+            var s = r.read_vim9_name();
+        }
+        else {
+            var s = r.read_name();
+        }
         return this.token(TOKEN_IDENTIFIER, s, pos);
     }
     else if (c == "|" && r.p(1) == "|") {
@@ -3291,7 +3372,7 @@ ExprTokenizer.prototype.get2 = function() {
         return this.token(TOKEN_COLON, ":", pos);
     }
     else if (c == "#") {
-        if (r.p(1) == "{") {
+        if (r.p(1) == "{" && !this.vim9) {
             r.seek_cur(2);
             return this.token(TOKEN_LITCOPEN, "#{", pos);
         }
@@ -3469,8 +3550,16 @@ ExprTokenizer.prototype.parse_dict_literal_key = function() {
 
 function ExprParser() { this.__init__.apply(this, arguments); }
 ExprParser.prototype.__init__ = function(reader) {
+    var a000 = Array.prototype.slice.call(arguments, 1);
     this.reader = reader;
-    this.tokenizer = new ExprTokenizer(reader);
+    // The VimLParser using this parser, if any.
+    this.parser = NIL;
+    this.vim9 = FALSE;
+    if (viml_len(a000) > 0) {
+        this.parser = a000[0];
+        this.vim9 = this.parser.isvim9();
+    }
+    this.tokenizer = new ExprTokenizer(reader, this.vim9);
 }
 
 ExprParser.prototype.parse = function() {
@@ -3808,7 +3897,7 @@ ExprParser.prototype.parse_expr5 = function() {
             node.right = this.parse_expr5_5();
             var left = node;
         }
-        else if (token.type == TOKEN_DOT) {
+        else if (token.type == TOKEN_DOT && !this.vim9) {
             // TODO check scriptversion?
             var node = Node(NODE_CONCAT);
             node.pos = token.pos;
@@ -3894,6 +3983,9 @@ ExprParser.prototype.parse_expr6 = function() {
 //        - expr7
 //        + expr7
 ExprParser.prototype.parse_expr7 = function() {
+    if (this.vim9) {
+        this.tokenizer.skip_vim9_newline(TRUE);
+    }
     var pos = this.reader.tell();
     var token = this.tokenizer.get();
     if (token.type == TOKEN_NOT) {
@@ -3934,8 +4026,12 @@ ExprParser.prototype.parse_expr8 = function() {
         var pos = this.reader.tell();
         var c = this.reader.peek();
         var token = this.tokenizer.get();
-        if (!iswhite(c) && token.type == TOKEN_SQOPEN) {
+        // In Vim9 script no white space or line break is allowed before "[" and
+        // "(", a member "." may start a continuation line.
+        var attached = !iswhite(c) && !(this.vim9 && c == "<EOL>");
+        if (attached && token.type == TOKEN_SQOPEN) {
             var npos = token.pos;
+            this.tokenizer.depth += 1;
             if (this.tokenizer.peek().type == TOKEN_COLON) {
                 this.tokenizer.get();
                 var node = Node(NODE_SLICE);
@@ -3947,6 +4043,7 @@ ExprParser.prototype.parse_expr8 = function() {
                     node.rlist[1] = this.parse_expr1();
                 }
                 var token = this.tokenizer.get();
+                this.tokenizer.depth -= 1;
                 if (token.type != TOKEN_SQCLOSE) {
                     throw Err(viml_printf("unexpected token: %s", token.value), token.pos);
                 }
@@ -3965,6 +4062,7 @@ ExprParser.prototype.parse_expr8 = function() {
                         node.rlist[1] = this.parse_expr1();
                     }
                     var token = this.tokenizer.get();
+                    this.tokenizer.depth -= 1;
                     if (token.type != TOKEN_SQCLOSE) {
                         throw Err(viml_printf("unexpected token: %s", token.value), token.pos);
                     }
@@ -3976,6 +4074,7 @@ ExprParser.prototype.parse_expr8 = function() {
                     node.left = left;
                     node.right = right;
                     var token = this.tokenizer.get();
+                    this.tokenizer.depth -= 1;
                     if (token.type != TOKEN_SQCLOSE) {
                         throw Err(viml_printf("unexpected token: %s", token.value), token.pos);
                     }
@@ -4001,7 +4100,7 @@ ExprParser.prototype.parse_expr8 = function() {
             var left = node;
             delete node;
         }
-        else if (token.type == TOKEN_POPEN) {
+        else if (token.type == TOKEN_POPEN && (attached || !this.vim9)) {
             var node = Node(NODE_CALL);
             node.pos = token.pos;
             node.left = left;
@@ -4009,7 +4108,7 @@ ExprParser.prototype.parse_expr8 = function() {
             var left = node;
             delete node;
         }
-        else if (!iswhite(c) && token.type == TOKEN_DOT) {
+        else if ((attached || this.vim9 && c == "<EOL>") && token.type == TOKEN_DOT) {
             // TODO check scriptversion?
             var node = this.parse_dot(token, left);
             if (node === NIL) {
@@ -4029,9 +4128,11 @@ ExprParser.prototype.parse_expr8 = function() {
 
 ExprParser.prototype.parse_rlist = function() {
     var rlist = [];
+    this.tokenizer.depth += 1;
     var token = this.tokenizer.peek();
     if (this.tokenizer.peek().type == TOKEN_PCLOSE) {
         this.tokenizer.get();
+        this.tokenizer.depth -= 1;
     }
     else {
         while (TRUE) {
@@ -4041,10 +4142,12 @@ ExprParser.prototype.parse_rlist = function() {
                 // XXX: Vim allows foo(a, b, ).  Lint should warn it.
                 if (this.tokenizer.peek().type == TOKEN_PCLOSE) {
                     this.tokenizer.get();
+                    this.tokenizer.depth -= 1;
                     break;
                 }
             }
             else if (token.type == TOKEN_PCLOSE) {
+                this.tokenizer.depth -= 1;
                 break;
             }
             else {
@@ -4104,6 +4207,7 @@ ExprParser.prototype.parse_expr9 = function() {
         var node = Node(NODE_LIST);
         node.pos = token.pos;
         node.value = [];
+        this.tokenizer.depth += 1;
         var token = this.tokenizer.peek();
         if (token.type == TOKEN_SQCLOSE) {
             this.tokenizer.get();
@@ -4128,6 +4232,10 @@ ExprParser.prototype.parse_expr9 = function() {
                 }
             }
         }
+        this.tokenizer.depth -= 1;
+    }
+    else if (token.type == TOKEN_COPEN && this.vim9) {
+        var node = this.parse_vim9_dict(token);
     }
     else if (token.type == TOKEN_COPEN || token.type == TOKEN_LITCOPEN) {
         var is_litdict = token.type == TOKEN_LITCOPEN;
@@ -4257,8 +4365,10 @@ ExprParser.prototype.parse_expr9 = function() {
         return node;
     }
     else if (token.type == TOKEN_POPEN) {
+        this.tokenizer.depth += 1;
         var node = this.parse_expr1();
         var token = this.tokenizer.get();
+        this.tokenizer.depth -= 1;
         if (token.type != TOKEN_PCLOSE) {
             throw Err(viml_printf("unexpected token: %s", token.value), token.pos);
         }
@@ -4301,11 +4411,58 @@ ExprParser.prototype.parse_expr9 = function() {
     return node;
 }
 
+// Vim9 dictionary: {key: expr1, "key": expr1, [expr1]: expr1, ...}
+// A key made of word characters and "-" is a literal string.
+ExprParser.prototype.parse_vim9_dict = function(token) {
+    var node = Node(NODE_DICT);
+    node.pos = token.pos;
+    node.value = [];
+    this.tokenizer.depth += 1;
+    while (TRUE) {
+        var token = this.tokenizer.peek();
+        if (token.type == TOKEN_CCLOSE) {
+            this.tokenizer.get();
+            break;
+        }
+        if (token.type == TOKEN_SQOPEN) {
+            this.tokenizer.get();
+            var key = this.parse_expr1();
+            var token = this.tokenizer.get();
+            if (token.type != TOKEN_SQCLOSE) {
+                throw Err(viml_printf("unexpected token: %s", token.value), token.pos);
+            }
+        }
+        else if (token.type == TOKEN_SQUOTE || token.type == TOKEN_DQUOTE) {
+            var key = this.parse_expr1();
+        }
+        else {
+            this.tokenizer.skip_vim9_newline(FALSE);
+            var key = this.tokenizer.parse_dict_literal_key();
+        }
+        var token = this.tokenizer.get();
+        if (token.type != TOKEN_COLON) {
+            throw Err(viml_printf("unexpected token: %s", token.value), token.pos);
+        }
+        var val = this.parse_expr1();
+        viml_add(node.value, [key, val]);
+        var token = this.tokenizer.get();
+        if (token.type == TOKEN_CCLOSE) {
+            break;
+        }
+        else if (token.type != TOKEN_COMMA) {
+            throw Err(viml_printf("unexpected token: %s", token.value), token.pos);
+        }
+    }
+    this.tokenizer.depth -= 1;
+    return node;
+}
+
 // SUBSCRIPT or CONCAT
 //   dict "." [0-9A-Za-z_]+ => (subscript dict key)
 //   str  "." expr6         => (concat str expr6)
+// In Vim9 script "." is always a member access.
 ExprParser.prototype.parse_dot = function(token, left) {
-    if (left.type != NODE_IDENTIFIER && left.type != NODE_CURLYNAME && left.type != NODE_DICT && left.type != NODE_SUBSCRIPT && left.type != NODE_CALL && left.type != NODE_DOT) {
+    if (!this.vim9 && left.type != NODE_IDENTIFIER && left.type != NODE_CURLYNAME && left.type != NODE_DICT && left.type != NODE_SUBSCRIPT && left.type != NODE_CALL && left.type != NODE_DOT) {
         return NIL;
     }
     if (!iswordc(this.reader.p(0))) {
@@ -4313,7 +4470,7 @@ ExprParser.prototype.parse_dot = function(token, left) {
     }
     var pos = this.reader.getpos();
     var name = this.reader.read_word();
-    if (isnamec(this.reader.p(0))) {
+    if (!this.vim9 && isnamec(this.reader.p(0))) {
         // XXX: foo is str => ok, foo is obj => invalid expression
         // foo.s:bar or foo.bar#baz
         return NIL;
@@ -4355,6 +4512,18 @@ ExprParser.prototype.parse_concat = function(token, left) {
 ExprParser.prototype.parse_identifier = function() {
     this.reader.skip_white();
     var npos = this.reader.getpos();
+    if (this.vim9) {
+        // Vim9 script has no curly-braces names.
+        var node = Node(NODE_IDENTIFIER);
+        node.pos = npos;
+        if (viml_equalci(this.reader.peekn(5), "<SID>")) {
+            node.value = this.reader.getn(5) + this.reader.read_vim9_name();
+        }
+        else {
+            node.value = this.reader.read_vim9_name();
+        }
+        return node;
+    }
     var curly_parts = this.parse_curly_parts();
     if (viml_len(curly_parts) == 1 && curly_parts[0].type == NODE_CURLYNAMEPART) {
         var node = Node(NODE_IDENTIFIER);
@@ -4798,6 +4967,20 @@ StringReader.prototype.read_nonwhite = function() {
 StringReader.prototype.read_name = function() {
     var r = "";
     while (isnamec(this.peekn(1))) {
+        r += this.getn(1);
+    }
+    return r;
+}
+
+// Read a Vim9 variable or function name.  Unlike read_name() a colon is only
+// part of the name after a one letter scope, e.g. "g:name".
+StringReader.prototype.read_vim9_name = function() {
+    var r = "";
+    var c = this.peekn(1);
+    if (c != "" && viml_stridx("bgltsvw", c) != -1 && this.p(1) == ":") {
+        var r = this.getn(2);
+    }
+    while (iswordc(this.peekn(1)) || this.peekn(1) == "#") {
         r += this.getn(1);
     }
     return r;

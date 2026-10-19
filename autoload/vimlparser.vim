@@ -227,6 +227,9 @@ let s:TOKEN_RSHIFT = 71
 
 let s:MAX_FUNC_ARGS = 20
 
+" Binary operators that continue a Vim9 expression from the previous line.
+let s:VIM9_CONTINUATION_OPS = {'+': 1, '-': 1, '*': 1, '/': 1, '%': 1, '..': 1, '||': 1, '&&': 1, '??': 1, '?': 1, ':': 1, '<<': 1, '>>': 1, '==': 1, '==?': 1, '==#': 1, '!=': 1, '!=?': 1, '!=#': 1, '>=': 1, '>=?': 1, '>=#': 1, '<=': 1, '<=?': 1, '<=#': 1, '=~': 1, '=~?': 1, '=~#': 1, '!~': 1, '!~?': 1, '!~#': 1, '>': 1, '>?': 1, '>#': 1, '<': 1, '<?': 1, '<#': 1}
+
 function! s:isalpha(c) abort
   return a:c =~# '^[A-Za-z]$'
 endfunction
@@ -2469,7 +2472,7 @@ function! s:VimLParser.parse_cmd_execute() abort
 endfunction
 
 function! s:VimLParser.parse_expr() abort
-  return s:ExprParser.new(self.reader).parse()
+  return s:ExprParser.new(self.reader, self).parse()
 endfunction
 
 function! s:VimLParser.parse_exprlist() abort
@@ -2487,7 +2490,7 @@ function! s:VimLParser.parse_exprlist() abort
 endfunction
 
 function! s:VimLParser.parse_lvalue_func() abort
-  let p = s:LvalueParser.new(self.reader)
+  let p = s:LvalueParser.new(self.reader, self)
   let node = p.parse()
   if node.type ==# s:NODE_IDENTIFIER || node.type ==# s:NODE_CURLYNAME || node.type ==# s:NODE_SUBSCRIPT || node.type ==# s:NODE_DOT || node.type ==# s:NODE_OPTION || node.type ==# s:NODE_ENV || node.type ==# s:NODE_REG
     return node
@@ -2497,7 +2500,7 @@ endfunction
 
 " FIXME:
 function! s:VimLParser.parse_lvalue() abort
-  let p = s:LvalueParser.new(self.reader)
+  let p = s:LvalueParser.new(self.reader, self)
   let node = p.parse()
   if node.type ==# s:NODE_IDENTIFIER
     if !s:isvarname(node.value)
@@ -2512,7 +2515,7 @@ endfunction
 
 " TODO: merge with s:VimLParser.parse_lvalue()
 function! s:VimLParser.parse_constlvalue() abort
-  let p = s:LvalueParser.new(self.reader)
+  let p = s:LvalueParser.new(self.reader, self)
   let node = p.parse()
   if node.type ==# s:NODE_IDENTIFIER
     if !s:isvarname(node.value)
@@ -2552,7 +2555,7 @@ endfunction
 " FIXME:
 function! s:VimLParser.parse_letlhs() abort
   let lhs = {'left': s:NIL, 'list': s:NIL, 'rest': s:NIL}
-  let tokenizer = s:ExprTokenizer.new(self.reader)
+  let tokenizer = s:ExprTokenizer.new(self.reader, self.isvim9())
   if tokenizer.peek().type ==# s:TOKEN_SQOPEN
     call tokenizer.get()
     let lhs.list = []
@@ -2586,7 +2589,7 @@ endfunction
 " TODO: merge with s:VimLParser.parse_letlhs() ?
 function! s:VimLParser.parse_constlhs() abort
   let lhs = {'left': s:NIL, 'list': s:NIL, 'rest': s:NIL}
-  let tokenizer = s:ExprTokenizer.new(self.reader)
+  let tokenizer = s:ExprTokenizer.new(self.reader, self.isvim9())
   if tokenizer.peek().type ==# s:TOKEN_SQOPEN
     call tokenizer.get()
     let lhs.list = []
@@ -3847,9 +3850,16 @@ function! s:ExprTokenizer.new(...) abort
   return obj
 endfunction
 
-function! s:ExprTokenizer.__init__(reader) abort
+function! s:ExprTokenizer.__init__(reader, ...) abort
   let self.reader = a:reader
   let self.cache = {}
+  let self.vim9 = s:FALSE
+  if len(a:000) > 0
+    let self.vim9 = a:000[0]
+  endif
+  " Nesting level of brackets, inside which a Vim9 expression may continue
+  " on the next line.
+  let self.depth = 0
 endfunction
 
 function! s:ExprTokenizer.token(type, value, pos) abort
@@ -3864,6 +3874,9 @@ function! s:ExprTokenizer.peek() abort
 endfunction
 
 function! s:ExprTokenizer.get() abort
+  if self.vim9
+    call self.skip_vim9_newline(s:FALSE)
+  endif
   " FIXME: remove dirty hack
   if has_key(self.cache, self.reader.tell())
     let x = self.cache[self.reader.tell()]
@@ -3875,6 +3888,66 @@ function! s:ExprTokenizer.get() abort
   let r = self.get2()
   let self.cache[pos] = [self.reader.tell(), r]
   return r
+endfunction
+
+" In Vim9 script an expression continues on the next line inside brackets,
+" after an operator (a:force), and before an operator that starts the next
+" line.  Comments and empty lines in between are skipped.
+function! s:ExprTokenizer.skip_vim9_newline(force) abort
+  let r = self.reader
+  let force = a:force
+  while s:TRUE
+    let pos = r.tell()
+    call r.skip_white()
+    if r.peek() ==# '#' && r.tell() > 0 && (s:iswhite(r.p(-1)) || r.p(-1) ==# '<EOL>')
+      call r.getn(-1)
+    endif
+    if r.peek() !=# '<EOL>' || !(force || self.depth > 0 || self.next_line_continues())
+      call r.seek_set(pos)
+      return
+    endif
+    call r.get()
+    let force = s:TRUE
+  endwhile
+endfunction
+
+" Return TRUE when the next line, ignoring comments and empty lines, starts
+" with an operator that continues the expression.
+function! s:ExprTokenizer.next_line_continues() abort
+  let r = self.reader
+  let pos = r.tell()
+  while r.peek() ==# '<EOL>'
+    call r.get()
+    call r.skip_white()
+    if r.peek() ==# '#'
+      call r.getn(-1)
+    endif
+  endwhile
+  let c = r.peek()
+  let continues = s:FALSE
+  if c ==# '-' && r.p(1) ==# '>'
+    let continues = s:TRUE
+  elseif c ==# '.' && s:iswordc1(r.p(1))
+    let continues = s:TRUE
+  elseif c ==# 'i' && r.p(1) ==# 's'
+    let op = r.read_alpha()
+    if op ==# 'is' || op ==# 'isnot'
+      if r.peek() ==# '?' || r.peek() ==# '#'
+        call r.get()
+      endif
+      let continues = s:iswhite(r.peek()) || r.peek() ==# '<EOL>'
+    endif
+  elseif c !=# '<EOF>' && stridx('+-*/%.|&?:=!<>', c) !=# -1
+    let op = ''
+    while r.peek() !=# '<EOF>' && stridx('+-*/%.|&?:=!<>~#', r.peek()) !=# -1
+      let op .= r.get()
+    endwhile
+    if has_key(s:VIM9_CONTINUATION_OPS, op)
+      let continues = s:iswhite(r.peek()) || r.peek() ==# '<EOL>'
+    endif
+  endif
+  call r.seek_set(pos)
+  return continues
 endfunction
 
 function! s:ExprTokenizer.get2() abort
@@ -3935,7 +4008,11 @@ function! s:ExprTokenizer.get2() abort
       return self.token(s:TOKEN_ISNOT, 'isnot', pos)
     endif
   elseif s:isnamec1(c)
-    let s = r.read_name()
+    if self.vim9
+      let s = r.read_vim9_name()
+    else
+      let s = r.read_name()
+    endif
     return self.token(s:TOKEN_IDENTIFIER, s, pos)
   elseif c ==# '|' && r.p(1) ==# '|'
     call r.seek_cur(2)
@@ -4078,7 +4155,7 @@ function! s:ExprTokenizer.get2() abort
     call r.seek_cur(1)
     return self.token(s:TOKEN_COLON, ':', pos)
   elseif c ==# '#'
-    if r.p(1) ==# '{'
+    if r.p(1) ==# '{' && !self.vim9
       call r.seek_cur(2)
       return self.token(s:TOKEN_LITCOPEN, '#{', pos)
     else
@@ -4237,9 +4314,16 @@ function! s:ExprParser.new(...) abort
   return obj
 endfunction
 
-function! s:ExprParser.__init__(reader) abort
+function! s:ExprParser.__init__(reader, ...) abort
   let self.reader = a:reader
-  let self.tokenizer = s:ExprTokenizer.new(a:reader)
+  " The VimLParser using this parser, if any.
+  let self.parser = s:NIL
+  let self.vim9 = s:FALSE
+  if len(a:000) > 0
+    let self.parser = a:000[0]
+    let self.vim9 = self.parser.isvim9()
+  endif
+  let self.tokenizer = s:ExprTokenizer.new(a:reader, self.vim9)
 endfunction
 
 function! s:ExprParser.parse() abort
@@ -4540,7 +4624,7 @@ function! s:ExprParser.parse_expr5() abort
       let node.left = left
       let node.right = self.parse_expr5_5()
       let left = node
-    elseif token.type ==# s:TOKEN_DOT " TODO check scriptversion?
+    elseif token.type ==# s:TOKEN_DOT && !self.vim9 " TODO check scriptversion?
       let node = s:Node(s:NODE_CONCAT)
       let node.pos = token.pos
       let node.left = left
@@ -4619,6 +4703,9 @@ endfunction
 "        - expr7
 "        + expr7
 function! s:ExprParser.parse_expr7() abort
+  if self.vim9
+    call self.tokenizer.skip_vim9_newline(s:TRUE)
+  endif
   let pos = self.reader.tell()
   let token = self.tokenizer.get()
   if token.type ==# s:TOKEN_NOT
@@ -4656,8 +4743,12 @@ function! s:ExprParser.parse_expr8() abort
     let pos = self.reader.tell()
     let c = self.reader.peek()
     let token = self.tokenizer.get()
-    if !s:iswhite(c) && token.type ==# s:TOKEN_SQOPEN
+    " In Vim9 script no white space or line break is allowed before "[" and
+    " "(", a member "." may start a continuation line.
+    let attached = !s:iswhite(c) && !(self.vim9 && c ==# '<EOL>')
+    if attached && token.type ==# s:TOKEN_SQOPEN
       let npos = token.pos
+      let self.tokenizer.depth += 1
       if self.tokenizer.peek().type ==# s:TOKEN_COLON
         call self.tokenizer.get()
         let node = s:Node(s:NODE_SLICE)
@@ -4669,6 +4760,7 @@ function! s:ExprParser.parse_expr8() abort
           let node.rlist[1] = self.parse_expr1()
         endif
         let token = self.tokenizer.get()
+        let self.tokenizer.depth -= 1
         if token.type !=# s:TOKEN_SQCLOSE
           throw s:Err(printf('unexpected token: %s', token.value), token.pos)
         endif
@@ -4686,6 +4778,7 @@ function! s:ExprParser.parse_expr8() abort
             let node.rlist[1] = self.parse_expr1()
           endif
           let token = self.tokenizer.get()
+          let self.tokenizer.depth -= 1
           if token.type !=# s:TOKEN_SQCLOSE
             throw s:Err(printf('unexpected token: %s', token.value), token.pos)
           endif
@@ -4696,6 +4789,7 @@ function! s:ExprParser.parse_expr8() abort
           let node.left = left
           let node.right = right
           let token = self.tokenizer.get()
+          let self.tokenizer.depth -= 1
           if token.type !=# s:TOKEN_SQCLOSE
             throw s:Err(printf('unexpected token: %s', token.value), token.pos)
           endif
@@ -4719,14 +4813,14 @@ function! s:ExprParser.parse_expr8() abort
       let node.right = right
       let left = node
       unlet node
-    elseif token.type ==# s:TOKEN_POPEN
+    elseif token.type ==# s:TOKEN_POPEN && (attached || !self.vim9)
       let node = s:Node(s:NODE_CALL)
       let node.pos = token.pos
       let node.left = left
       let node.rlist = self.parse_rlist()
       let left = node
       unlet node
-    elseif !s:iswhite(c) && token.type ==# s:TOKEN_DOT " TODO check scriptversion?
+    elseif (attached || (self.vim9 && c ==# '<EOL>')) && token.type ==# s:TOKEN_DOT " TODO check scriptversion?
       let node = self.parse_dot(token, left)
       if node is# s:NIL
         call self.reader.seek_set(pos)
@@ -4744,9 +4838,11 @@ endfunction
 
 function! s:ExprParser.parse_rlist() abort
   let rlist = []
+  let self.tokenizer.depth += 1
   let token = self.tokenizer.peek()
   if self.tokenizer.peek().type ==# s:TOKEN_PCLOSE
     call self.tokenizer.get()
+    let self.tokenizer.depth -= 1
   else
     while s:TRUE
       call add(rlist, self.parse_expr1())
@@ -4755,9 +4851,11 @@ function! s:ExprParser.parse_rlist() abort
         " XXX: Vim allows foo(a, b, ).  Lint should warn it.
         if self.tokenizer.peek().type ==# s:TOKEN_PCLOSE
           call self.tokenizer.get()
+          let self.tokenizer.depth -= 1
           break
         endif
       elseif token.type ==# s:TOKEN_PCLOSE
+        let self.tokenizer.depth -= 1
         break
       else
         throw s:Err(printf('unexpected token: %s', token.value), token.pos)
@@ -4812,6 +4910,7 @@ function! s:ExprParser.parse_expr9() abort
     let node = s:Node(s:NODE_LIST)
     let node.pos = token.pos
     let node.value = []
+    let self.tokenizer.depth += 1
     let token = self.tokenizer.peek()
     if token.type ==# s:TOKEN_SQCLOSE
       call self.tokenizer.get()
@@ -4833,6 +4932,9 @@ function! s:ExprParser.parse_expr9() abort
         endif
       endwhile
     endif
+    let self.tokenizer.depth -= 1
+  elseif token.type ==# s:TOKEN_COPEN && self.vim9
+    let node = self.parse_vim9_dict(token)
   elseif token.type ==# s:TOKEN_COPEN || token.type ==# s:TOKEN_LITCOPEN
     let is_litdict = token.type ==# s:TOKEN_LITCOPEN
     let savepos = self.reader.tell()
@@ -4951,8 +5053,10 @@ function! s:ExprParser.parse_expr9() abort
     endwhile
     return node
   elseif token.type ==# s:TOKEN_POPEN
+    let self.tokenizer.depth += 1
     let node = self.parse_expr1()
     let token = self.tokenizer.get()
+    let self.tokenizer.depth -= 1
     if token.type !=# s:TOKEN_PCLOSE
       throw s:Err(printf('unexpected token: %s', token.value), token.pos)
     endif
@@ -4987,11 +5091,55 @@ function! s:ExprParser.parse_expr9() abort
   return node
 endfunction
 
+" Vim9 dictionary: {key: expr1, "key": expr1, [expr1]: expr1, ...}
+" A key made of word characters and "-" is a literal string.
+function! s:ExprParser.parse_vim9_dict(token) abort
+  let node = s:Node(s:NODE_DICT)
+  let node.pos = a:token.pos
+  let node.value = []
+  let self.tokenizer.depth += 1
+  while s:TRUE
+    let token = self.tokenizer.peek()
+    if token.type ==# s:TOKEN_CCLOSE
+      call self.tokenizer.get()
+      break
+    endif
+    if token.type ==# s:TOKEN_SQOPEN
+      call self.tokenizer.get()
+      let key = self.parse_expr1()
+      let token = self.tokenizer.get()
+      if token.type !=# s:TOKEN_SQCLOSE
+        throw s:Err(printf('unexpected token: %s', token.value), token.pos)
+      endif
+    elseif token.type ==# s:TOKEN_SQUOTE || token.type ==# s:TOKEN_DQUOTE
+      let key = self.parse_expr1()
+    else
+      call self.tokenizer.skip_vim9_newline(s:FALSE)
+      let key = self.tokenizer.parse_dict_literal_key()
+    endif
+    let token = self.tokenizer.get()
+    if token.type !=# s:TOKEN_COLON
+      throw s:Err(printf('unexpected token: %s', token.value), token.pos)
+    endif
+    let val = self.parse_expr1()
+    call add(node.value, [key, val])
+    let token = self.tokenizer.get()
+    if token.type ==# s:TOKEN_CCLOSE
+      break
+    elseif token.type !=# s:TOKEN_COMMA
+      throw s:Err(printf('unexpected token: %s', token.value), token.pos)
+    endif
+  endwhile
+  let self.tokenizer.depth -= 1
+  return node
+endfunction
+
 " SUBSCRIPT or CONCAT
 "   dict "." [0-9A-Za-z_]+ => (subscript dict key)
 "   str  "." expr6         => (concat str expr6)
+" In Vim9 script "." is always a member access.
 function! s:ExprParser.parse_dot(token, left) abort
-  if a:left.type !=# s:NODE_IDENTIFIER && a:left.type !=# s:NODE_CURLYNAME && a:left.type !=# s:NODE_DICT && a:left.type !=# s:NODE_SUBSCRIPT && a:left.type !=# s:NODE_CALL && a:left.type !=# s:NODE_DOT
+  if !self.vim9 && a:left.type !=# s:NODE_IDENTIFIER && a:left.type !=# s:NODE_CURLYNAME && a:left.type !=# s:NODE_DICT && a:left.type !=# s:NODE_SUBSCRIPT && a:left.type !=# s:NODE_CALL && a:left.type !=# s:NODE_DOT
     return s:NIL
   endif
   if !s:iswordc(self.reader.p(0))
@@ -4999,7 +5147,7 @@ function! s:ExprParser.parse_dot(token, left) abort
   endif
   let pos = self.reader.getpos()
   let name = self.reader.read_word()
-  if s:isnamec(self.reader.p(0))
+  if !self.vim9 && s:isnamec(self.reader.p(0))
     " XXX: foo is str => ok, foo is obj => invalid expression
     " foo.s:bar or foo.bar#baz
     return s:NIL
@@ -5041,6 +5189,17 @@ endfunction
 function! s:ExprParser.parse_identifier() abort
   call self.reader.skip_white()
   let npos = self.reader.getpos()
+  if self.vim9
+    " Vim9 script has no curly-braces names.
+    let node = s:Node(s:NODE_IDENTIFIER)
+    let node.pos = npos
+    if self.reader.peekn(5) ==? '<SID>'
+      let node.value = self.reader.getn(5) . self.reader.read_vim9_name()
+    else
+      let node.value = self.reader.read_vim9_name()
+    endif
+    return node
+  endif
   let curly_parts = self.parse_curly_parts()
   if len(curly_parts) ==# 1 && curly_parts[0].type ==# s:NODE_CURLYNAMEPART
     let node = s:Node(s:NODE_IDENTIFIER)
@@ -5462,6 +5621,20 @@ endfunction
 function! s:StringReader.read_name() abort
   let r = ''
   while s:isnamec(self.peekn(1))
+    let r .= self.getn(1)
+  endwhile
+  return r
+endfunction
+
+" Read a Vim9 variable or function name.  Unlike read_name() a colon is only
+" part of the name after a one letter scope, e.g. "g:name".
+function! s:StringReader.read_vim9_name() abort
+  let r = ''
+  let c = self.peekn(1)
+  if c !=# '' && stridx('bgltsvw', c) !=# -1 && self.p(1) ==# ':'
+    let r = self.getn(2)
+  endif
+  while s:iswordc(self.peekn(1)) || self.peekn(1) ==# '#'
     let r .= self.getn(1)
   endwhile
   return r

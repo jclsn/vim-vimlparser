@@ -392,6 +392,8 @@ TOKEN_HEREDOC = 69
 TOKEN_LSHIFT = 70
 TOKEN_RSHIFT = 71
 MAX_FUNC_ARGS = 20
+# Binary operators that continue a Vim9 expression from the previous line.
+VIM9_CONTINUATION_OPS = AttributeDict({"+": 1, "-": 1, "*": 1, "/": 1, "%": 1, "..": 1, "||": 1, "&&": 1, "??": 1, "?": 1, ":": 1, "<<": 1, ">>": 1, "==": 1, "==?": 1, "==#": 1, "!=": 1, "!=?": 1, "!=#": 1, ">=": 1, ">=?": 1, ">=#": 1, "<=": 1, "<=?": 1, "<=#": 1, "=~": 1, "=~?": 1, "=~#": 1, "!~": 1, "!~?": 1, "!~#": 1, ">": 1, ">?": 1, ">#": 1, "<": 1, "<?": 1, "<#": 1})
 
 
 def isalpha(c):
@@ -2283,7 +2285,7 @@ class VimLParser:
         self.add_node(node)
 
     def parse_expr(self):
-        return ExprParser(self.reader).parse()
+        return ExprParser(self.reader, self).parse()
 
     def parse_exprlist(self):
         list = []
@@ -2297,7 +2299,7 @@ class VimLParser:
         return list
 
     def parse_lvalue_func(self):
-        p = LvalueParser(self.reader)
+        p = LvalueParser(self.reader, self)
         node = p.parse()
         if node.type == NODE_IDENTIFIER or node.type == NODE_CURLYNAME or node.type == NODE_SUBSCRIPT or node.type == NODE_DOT or node.type == NODE_OPTION or node.type == NODE_ENV or node.type == NODE_REG:
             return node
@@ -2305,7 +2307,7 @@ class VimLParser:
 
     # FIXME:
     def parse_lvalue(self):
-        p = LvalueParser(self.reader)
+        p = LvalueParser(self.reader, self)
         node = p.parse()
         if node.type == NODE_IDENTIFIER:
             if not isvarname(node.value):
@@ -2316,7 +2318,7 @@ class VimLParser:
 
     # TODO: merge with s:VimLParser.parse_lvalue()
     def parse_constlvalue(self):
-        p = LvalueParser(self.reader)
+        p = LvalueParser(self.reader, self)
         node = p.parse()
         if node.type == NODE_IDENTIFIER:
             if not isvarname(node.value):
@@ -2348,7 +2350,7 @@ class VimLParser:
     # FIXME:
     def parse_letlhs(self):
         lhs = AttributeDict({"left": NIL, "list": NIL, "rest": NIL})
-        tokenizer = ExprTokenizer(self.reader)
+        tokenizer = ExprTokenizer(self.reader, self.isvim9())
         if tokenizer.peek().type == TOKEN_SQOPEN:
             tokenizer.get()
             lhs.list = []
@@ -2377,7 +2379,7 @@ class VimLParser:
     # TODO: merge with s:VimLParser.parse_letlhs() ?
     def parse_constlhs(self):
         lhs = AttributeDict({"left": NIL, "list": NIL, "rest": NIL})
-        tokenizer = ExprTokenizer(self.reader)
+        tokenizer = ExprTokenizer(self.reader, self.isvim9())
         if tokenizer.peek().type == TOKEN_SQOPEN:
             tokenizer.get()
             lhs.list = []
@@ -2463,9 +2465,15 @@ class VimLParser:
 
 class ExprTokenizer:
 
-    def __init__(self, reader):
+    def __init__(self, reader, *a000):
         self.reader = reader
         self.cache = AttributeDict({})
+        self.vim9 = FALSE
+        if viml_len(a000) > 0:
+            self.vim9 = a000[0]
+        # Nesting level of brackets, inside which a Vim9 expression may continue
+        # on the next line.
+        self.depth = 0
 
     def token(self, type, value, pos):
         return AttributeDict({"type": type, "value": value, "pos": pos})
@@ -2477,6 +2485,8 @@ class ExprTokenizer:
         return r
 
     def get(self):
+        if self.vim9:
+            self.skip_vim9_newline(FALSE)
         # FIXME: remove dirty hack
         if viml_has_key(self.cache, self.reader.tell()):
             x = self.cache[self.reader.tell()]
@@ -2487,6 +2497,54 @@ class ExprTokenizer:
         r = self.get2()
         self.cache[pos] = [self.reader.tell(), r]
         return r
+
+    # In Vim9 script an expression continues on the next line inside brackets,
+    # after an operator (a:force), and before an operator that starts the next
+    # line.  Comments and empty lines in between are skipped.
+    def skip_vim9_newline(self, force):
+        r = self.reader
+        force = force
+        while TRUE:
+            pos = r.tell()
+            r.skip_white()
+            if r.peek() == "#" and r.tell() > 0 and (iswhite(r.p(-1)) or r.p(-1) == "<EOL>"):
+                r.getn(-1)
+            if r.peek() != "<EOL>" or not (force or self.depth > 0 or self.next_line_continues()):
+                r.seek_set(pos)
+                return
+            r.get()
+            force = TRUE
+
+    # Return TRUE when the next line, ignoring comments and empty lines, starts
+    # with an operator that continues the expression.
+    def next_line_continues(self):
+        r = self.reader
+        pos = r.tell()
+        while r.peek() == "<EOL>":
+            r.get()
+            r.skip_white()
+            if r.peek() == "#":
+                r.getn(-1)
+        c = r.peek()
+        continues = FALSE
+        if c == "-" and r.p(1) == ">":
+            continues = TRUE
+        elif c == "." and iswordc1(r.p(1)):
+            continues = TRUE
+        elif c == "i" and r.p(1) == "s":
+            op = r.read_alpha()
+            if op == "is" or op == "isnot":
+                if r.peek() == "?" or r.peek() == "#":
+                    r.get()
+                continues = iswhite(r.peek()) or r.peek() == "<EOL>"
+        elif c != "<EOF>" and viml_stridx("+-*/%.|&?:=!<>", c) != -1:
+            op = ""
+            while r.peek() != "<EOF>" and viml_stridx("+-*/%.|&?:=!<>~#", r.peek()) != -1:
+                op += r.get()
+            if viml_has_key(VIM9_CONTINUATION_OPS, op):
+                continues = iswhite(r.peek()) or r.peek() == "<EOL>"
+        r.seek_set(pos)
+        return continues
 
     def get2(self):
         r = self.reader
@@ -2542,7 +2600,10 @@ class ExprTokenizer:
                 r.seek_cur(5)
                 return self.token(TOKEN_ISNOT, "isnot", pos)
         elif isnamec1(c):
-            s = r.read_name()
+            if self.vim9:
+                s = r.read_vim9_name()
+            else:
+                s = r.read_name()
             return self.token(TOKEN_IDENTIFIER, s, pos)
         elif c == "|" and r.p(1) == "|":
             r.seek_cur(2)
@@ -2677,7 +2738,7 @@ class ExprTokenizer:
             r.seek_cur(1)
             return self.token(TOKEN_COLON, ":", pos)
         elif c == "#":
-            if r.p(1) == "{":
+            if r.p(1) == "{" and not self.vim9:
                 r.seek_cur(2)
                 return self.token(TOKEN_LITCOPEN, "#{", pos)
             else:
@@ -2812,9 +2873,15 @@ class ExprTokenizer:
 
 class ExprParser:
 
-    def __init__(self, reader):
+    def __init__(self, reader, *a000):
         self.reader = reader
-        self.tokenizer = ExprTokenizer(reader)
+        # The VimLParser using this parser, if any.
+        self.parser = NIL
+        self.vim9 = FALSE
+        if viml_len(a000) > 0:
+            self.parser = a000[0]
+            self.vim9 = self.parser.isvim9()
+        self.tokenizer = ExprTokenizer(reader, self.vim9)
 
     def parse(self):
         return self.parse_expr1()
@@ -3103,7 +3170,7 @@ class ExprParser:
                 node.left = left
                 node.right = self.parse_expr5_5()
                 left = node
-            elif token.type == TOKEN_DOT:
+            elif token.type == TOKEN_DOT and not self.vim9:
                 # TODO check scriptversion?
                 node = Node(NODE_CONCAT)
                 node.pos = token.pos
@@ -3174,6 +3241,8 @@ class ExprParser:
     #        - expr7
     #        + expr7
     def parse_expr7(self):
+        if self.vim9:
+            self.tokenizer.skip_vim9_newline(TRUE)
         pos = self.reader.tell()
         token = self.tokenizer.get()
         if token.type == TOKEN_NOT:
@@ -3209,8 +3278,12 @@ class ExprParser:
             pos = self.reader.tell()
             c = self.reader.peek()
             token = self.tokenizer.get()
-            if not iswhite(c) and token.type == TOKEN_SQOPEN:
+            # In Vim9 script no white space or line break is allowed before "[" and
+            # "(", a member "." may start a continuation line.
+            attached = not iswhite(c) and not (self.vim9 and c == "<EOL>")
+            if attached and token.type == TOKEN_SQOPEN:
                 npos = token.pos
+                self.tokenizer.depth += 1
                 if self.tokenizer.peek().type == TOKEN_COLON:
                     self.tokenizer.get()
                     node = Node(NODE_SLICE)
@@ -3221,6 +3294,7 @@ class ExprParser:
                     if token.type != TOKEN_SQCLOSE:
                         node.rlist[1] = self.parse_expr1()
                     token = self.tokenizer.get()
+                    self.tokenizer.depth -= 1
                     if token.type != TOKEN_SQCLOSE:
                         raise VimLParserException(Err(viml_printf("unexpected token: %s", token.value), token.pos))
                     left = node
@@ -3236,6 +3310,7 @@ class ExprParser:
                         if token.type != TOKEN_SQCLOSE:
                             node.rlist[1] = self.parse_expr1()
                         token = self.tokenizer.get()
+                        self.tokenizer.depth -= 1
                         if token.type != TOKEN_SQCLOSE:
                             raise VimLParserException(Err(viml_printf("unexpected token: %s", token.value), token.pos))
                         left = node
@@ -3245,6 +3320,7 @@ class ExprParser:
                         node.left = left
                         node.right = right
                         token = self.tokenizer.get()
+                        self.tokenizer.depth -= 1
                         if token.type != TOKEN_SQCLOSE:
                             raise VimLParserException(Err(viml_printf("unexpected token: %s", token.value), token.pos))
                         left = node
@@ -3264,14 +3340,14 @@ class ExprParser:
                 node.right = right
                 left = node
                 del node
-            elif token.type == TOKEN_POPEN:
+            elif token.type == TOKEN_POPEN and (attached or not self.vim9):
                 node = Node(NODE_CALL)
                 node.pos = token.pos
                 node.left = left
                 node.rlist = self.parse_rlist()
                 left = node
                 del node
-            elif not iswhite(c) and token.type == TOKEN_DOT:
+            elif (attached or self.vim9 and c == "<EOL>") and token.type == TOKEN_DOT:
                 # TODO check scriptversion?
                 node = self.parse_dot(token, left)
                 if node is NIL:
@@ -3286,9 +3362,11 @@ class ExprParser:
 
     def parse_rlist(self):
         rlist = []
+        self.tokenizer.depth += 1
         token = self.tokenizer.peek()
         if self.tokenizer.peek().type == TOKEN_PCLOSE:
             self.tokenizer.get()
+            self.tokenizer.depth -= 1
         else:
             while TRUE:
                 viml_add(rlist, self.parse_expr1())
@@ -3297,8 +3375,10 @@ class ExprParser:
                     # XXX: Vim allows foo(a, b, ).  Lint should warn it.
                     if self.tokenizer.peek().type == TOKEN_PCLOSE:
                         self.tokenizer.get()
+                        self.tokenizer.depth -= 1
                         break
                 elif token.type == TOKEN_PCLOSE:
+                    self.tokenizer.depth -= 1
                     break
                 else:
                     raise VimLParserException(Err(viml_printf("unexpected token: %s", token.value), token.pos))
@@ -3348,6 +3428,7 @@ class ExprParser:
             node = Node(NODE_LIST)
             node.pos = token.pos
             node.value = []
+            self.tokenizer.depth += 1
             token = self.tokenizer.peek()
             if token.type == TOKEN_SQCLOSE:
                 self.tokenizer.get()
@@ -3365,6 +3446,9 @@ class ExprParser:
                         break
                     else:
                         raise VimLParserException(Err(viml_printf("unexpected token: %s", token.value), token.pos))
+            self.tokenizer.depth -= 1
+        elif token.type == TOKEN_COPEN and self.vim9:
+            node = self.parse_vim9_dict(token)
         elif token.type == TOKEN_COPEN or token.type == TOKEN_LITCOPEN:
             is_litdict = token.type == TOKEN_LITCOPEN
             savepos = self.reader.tell()
@@ -3465,8 +3549,10 @@ class ExprParser:
                     raise VimLParserException(Err(viml_printf("unexpected token: %s", token.value), token.pos))
             return node
         elif token.type == TOKEN_POPEN:
+            self.tokenizer.depth += 1
             node = self.parse_expr1()
             token = self.tokenizer.get()
+            self.tokenizer.depth -= 1
             if token.type != TOKEN_PCLOSE:
                 raise VimLParserException(Err(viml_printf("unexpected token: %s", token.value), token.pos))
         elif token.type == TOKEN_OPTION:
@@ -3498,17 +3584,54 @@ class ExprParser:
             raise VimLParserException(Err(viml_printf("unexpected token: %s", token.value), token.pos))
         return node
 
+    # Vim9 dictionary: {key: expr1, "key": expr1, [expr1]: expr1, ...}
+    # A key made of word characters and "-" is a literal string.
+    def parse_vim9_dict(self, token):
+        node = Node(NODE_DICT)
+        node.pos = token.pos
+        node.value = []
+        self.tokenizer.depth += 1
+        while TRUE:
+            token = self.tokenizer.peek()
+            if token.type == TOKEN_CCLOSE:
+                self.tokenizer.get()
+                break
+            if token.type == TOKEN_SQOPEN:
+                self.tokenizer.get()
+                key = self.parse_expr1()
+                token = self.tokenizer.get()
+                if token.type != TOKEN_SQCLOSE:
+                    raise VimLParserException(Err(viml_printf("unexpected token: %s", token.value), token.pos))
+            elif token.type == TOKEN_SQUOTE or token.type == TOKEN_DQUOTE:
+                key = self.parse_expr1()
+            else:
+                self.tokenizer.skip_vim9_newline(FALSE)
+                key = self.tokenizer.parse_dict_literal_key()
+            token = self.tokenizer.get()
+            if token.type != TOKEN_COLON:
+                raise VimLParserException(Err(viml_printf("unexpected token: %s", token.value), token.pos))
+            val = self.parse_expr1()
+            viml_add(node.value, [key, val])
+            token = self.tokenizer.get()
+            if token.type == TOKEN_CCLOSE:
+                break
+            elif token.type != TOKEN_COMMA:
+                raise VimLParserException(Err(viml_printf("unexpected token: %s", token.value), token.pos))
+        self.tokenizer.depth -= 1
+        return node
+
     # SUBSCRIPT or CONCAT
     #   dict "." [0-9A-Za-z_]+ => (subscript dict key)
     #   str  "." expr6         => (concat str expr6)
+    # In Vim9 script "." is always a member access.
     def parse_dot(self, token, left):
-        if left.type != NODE_IDENTIFIER and left.type != NODE_CURLYNAME and left.type != NODE_DICT and left.type != NODE_SUBSCRIPT and left.type != NODE_CALL and left.type != NODE_DOT:
+        if not self.vim9 and left.type != NODE_IDENTIFIER and left.type != NODE_CURLYNAME and left.type != NODE_DICT and left.type != NODE_SUBSCRIPT and left.type != NODE_CALL and left.type != NODE_DOT:
             return NIL
         if not iswordc(self.reader.p(0)):
             return NIL
         pos = self.reader.getpos()
         name = self.reader.read_word()
-        if isnamec(self.reader.p(0)):
+        if not self.vim9 and isnamec(self.reader.p(0)):
             # XXX: foo is str => ok, foo is obj => invalid expression
             # foo.s:bar or foo.bar#baz
             return NIL
@@ -3544,6 +3667,15 @@ class ExprParser:
     def parse_identifier(self):
         self.reader.skip_white()
         npos = self.reader.getpos()
+        if self.vim9:
+            # Vim9 script has no curly-braces names.
+            node = Node(NODE_IDENTIFIER)
+            node.pos = npos
+            if viml_equalci(self.reader.peekn(5), "<SID>"):
+                node.value = self.reader.getn(5) + self.reader.read_vim9_name()
+            else:
+                node.value = self.reader.read_vim9_name()
+            return node
         curly_parts = self.parse_curly_parts()
         if viml_len(curly_parts) == 1 and curly_parts[0].type == NODE_CURLYNAMEPART:
             node = Node(NODE_IDENTIFIER)
@@ -3890,6 +4022,17 @@ class StringReader:
     def read_name(self):
         r = ""
         while isnamec(self.peekn(1)):
+            r += self.getn(1)
+        return r
+
+    # Read a Vim9 variable or function name.  Unlike read_name() a colon is only
+    # part of the name after a one letter scope, e.g. "g:name".
+    def read_vim9_name(self):
+        r = ""
+        c = self.peekn(1)
+        if c != "" and viml_stridx("bgltsvw", c) != -1 and self.p(1) == ":":
+            r = self.getn(2)
+        while iswordc(self.peekn(1)) or self.peekn(1) == "#":
             r += self.getn(1)
         return r
 
