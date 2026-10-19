@@ -333,6 +333,8 @@ var NODE_FINAL = 104;
 var NODE_EXPORT = 105;
 var NODE_IMPORT = 106;
 var NODE_VIM9SCRIPT = 107;
+var NODE_TUPLE = 108;
+var NODE_CAST = 109;
 var TOKEN_EOF = 1;
 var TOKEN_EOL = 2;
 var TOKEN_SPACE = 3;
@@ -404,6 +406,7 @@ var TOKEN_DOTDOT = 68;
 var TOKEN_HEREDOC = 69;
 var TOKEN_LSHIFT = 70;
 var TOKEN_RSHIFT = 71;
+var TOKEN_FATARROW = 72;
 var MAX_FUNC_ARGS = 20;
 // Binary operators that continue a Vim9 expression from the previous line.
 var VIM9_CONTINUATION_OPS = {"+":1, "-":1, "*":1, "/":1, "%":1, "..":1, "||":1, "&&":1, "??":1, "?":1, ":":1, "<<":1, ">>":1, "==":1, "==?":1, "==#":1, "!=":1, "!=?":1, "!=#":1, ">=":1, ">=?":1, ">=#":1, "<=":1, "<=?":1, "<=#":1, "=~":1, "=~?":1, "=~#":1, "!~":1, "!~?":1, "!~#":1, ">":1, ">?":1, ">#":1, "<":1, "<?":1, "<#":1};
@@ -608,7 +611,7 @@ function ExArg() {
 // REG .value
 // CURLYNAMEPART .value
 // CURLYNAMEEXPR .value
-// LAMBDA .rlist .left
+// LAMBDA .rlist .left .body .rettype
 // HEREDOC .rlist .op .body
 // DEF .ea .body .left .rlist .default_args .attr .enddef
 // ENDDEF .ea
@@ -617,6 +620,8 @@ function ExArg() {
 // EXPORT .ea .body
 // IMPORT .ea .str .left
 // VIM9SCRIPT .ea .noclear
+// TUPLE .value
+// CAST .type_str .left
 function Node(type) {
     return {"type":type};
 }
@@ -644,7 +649,7 @@ VimLParser.prototype.isvim9 = function() {
     var __c3 = this.context;
     for (var __i3 = 0; __i3 < __c3.length; ++__i3) {
         var node = __c3[__i3];
-        if (node.type == NODE_DEF) {
+        if (node.type == NODE_DEF || node.type == NODE_LAMBDA) {
             return TRUE;
         }
         else if (node.type == NODE_FUNCTION) {
@@ -1863,7 +1868,7 @@ VimLParser.prototype.parse_cmd_delfunction = function() {
 }
 
 VimLParser.prototype.parse_cmd_return = function() {
-    if (this.find_context(NODE_FUNCTION) == -1 && this.find_context(NODE_DEF) == -1) {
+    if (this.find_context(NODE_FUNCTION) == -1 && this.find_context(NODE_DEF) == -1 && this.find_context(NODE_LAMBDA) == -1) {
         throw Err("E133: :return not inside a function", this.ea.cmdpos);
     }
     var node = Node(NODE_RETURN);
@@ -2260,6 +2265,36 @@ VimLParser.prototype.read_type = function() {
         }
     }
     return type_str;
+}
+
+// Parse the statements of a Vim9 lambda "(args) => {", up to the "}" at the
+// start of a line.  Only a comment may follow the "{".
+VimLParser.prototype.parse_lambda_block = function(node) {
+    var ea = this.ea;
+    this.reader.skip_white();
+    if (this.reader.peek() == "#") {
+        this.reader.getn(-1);
+    }
+    if (this.reader.peek() != "<EOL>") {
+        throw Err(viml_printf("E488: Trailing characters: %s", this.reader.peekline()), this.reader.getpos());
+    }
+    this.reader.get();
+    this.push_context(node);
+    while (TRUE) {
+        if (this.reader.peek() == "<EOF>") {
+            throw Err("E1171: Missing } after inline function", this.reader.getpos());
+        }
+        var pos = this.reader.tell();
+        this.reader.skip_white();
+        if (this.context[0] === node && this.reader.peek() == "}") {
+            this.reader.get();
+            break;
+        }
+        this.reader.seek_set(pos);
+        this.parse_one_cmd();
+    }
+    this.pop_context();
+    this.ea = ea;
 }
 
 VimLParser.prototype.parse_cmd_enddef = function() {
@@ -3197,6 +3232,10 @@ ExprTokenizer.prototype.get2 = function() {
         r.seek_cur(2);
         return this.token(TOKEN_ANDAND, "&&", pos);
     }
+    else if (c == "=" && r.p(1) == ">" && this.vim9) {
+        r.seek_cur(2);
+        return this.token(TOKEN_FATARROW, "=>", pos);
+    }
     else if (c == "=" && r.p(1) == "=") {
         if (r.p(2) == "?") {
             r.seek_cur(3);
@@ -4006,6 +4045,18 @@ ExprParser.prototype.parse_expr7 = function() {
         node.left = this.parse_expr7();
         return node;
     }
+    else if (token.type == TOKEN_LT && this.vim9 && !viml_equalci(this.reader.peekn(4), "SID>")) {
+        // Vim9 type cast: <type>expr
+        var node = Node(NODE_CAST);
+        node.pos = token.pos;
+        node.type_str = this.parser.read_type();
+        var token = this.tokenizer.get();
+        if (token.type != TOKEN_GT) {
+            throw Err(viml_printf("unexpected token: %s", token.value), token.pos);
+        }
+        node.left = this.parse_expr7();
+        return node;
+    }
     else {
         this.reader.seek_set(pos);
         var node = this.parse_expr8();
@@ -4364,6 +4415,9 @@ ExprParser.prototype.parse_expr9 = function() {
         }
         return node;
     }
+    else if (token.type == TOKEN_POPEN && this.vim9) {
+        var node = this.parse_vim9_paren(token);
+    }
     else if (token.type == TOKEN_POPEN) {
         this.tokenizer.depth += 1;
         var node = this.parse_expr1();
@@ -4408,6 +4462,150 @@ ExprParser.prototype.parse_expr9 = function() {
     else {
         throw Err(viml_printf("unexpected token: %s", token.value), token.pos);
     }
+    return node;
+}
+
+// Vim9 lambda, tuple or expression in parentheses, after the "(":
+//   (args) => expr1
+//   (args): type => {
+//   ()  (expr1,)  (expr1, expr1, ...)
+//   (expr1)
+ExprParser.prototype.parse_vim9_paren = function(token) {
+    if (this.is_vim9_lambda()) {
+        return this.parse_vim9_lambda(token);
+    }
+    this.tokenizer.depth += 1;
+    var token = this.tokenizer.peek();
+    if (token.type == TOKEN_PCLOSE) {
+        this.tokenizer.get();
+        this.tokenizer.depth -= 1;
+        var node = Node(NODE_TUPLE);
+        node.pos = token.pos;
+        node.value = [];
+        return node;
+    }
+    var node = this.parse_expr1();
+    var token = this.tokenizer.get();
+    if (token.type == TOKEN_COMMA) {
+        var tuple = Node(NODE_TUPLE);
+        tuple.pos = token.pos;
+        tuple.value = [node];
+        while (this.tokenizer.peek().type != TOKEN_PCLOSE) {
+            viml_add(tuple.value, this.parse_expr1());
+            var token = this.tokenizer.peek();
+            if (token.type == TOKEN_COMMA) {
+                this.tokenizer.get();
+            }
+            else if (token.type != TOKEN_PCLOSE) {
+                throw Err(viml_printf("unexpected token: %s", token.value), token.pos);
+            }
+        }
+        var token = this.tokenizer.get();
+        var node = tuple;
+    }
+    this.tokenizer.depth -= 1;
+    if (token.type != TOKEN_PCLOSE) {
+        throw Err(viml_printf("unexpected token: %s", token.value), token.pos);
+    }
+    return node;
+}
+
+// Return TRUE when the text after "(" is the argument list of a Vim9 lambda,
+// i.e. names with optional types, ")", an optional return type and "=>".
+ExprParser.prototype.is_vim9_lambda = function() {
+    var r = this.reader;
+    var pos = r.tell();
+    var result = FALSE;
+    while (TRUE) {
+        r.skip_white();
+        if (r.peekn(1) == ")") {
+            break;
+        }
+        if (r.peekn(3) == "...") {
+            r.getn(3);
+        }
+        if (r.read_word() == "") {
+            r.seek_set(pos);
+            return FALSE;
+        }
+        if (r.peekn(1) == ":") {
+            r.getn(1);
+            r.skip_white();
+            this.parser.read_type();
+        }
+        r.skip_white();
+        if (r.peekn(1) == ",") {
+            r.getn(1);
+        }
+        else if (r.peekn(1) != ")") {
+            r.seek_set(pos);
+            return FALSE;
+        }
+    }
+    r.getn(1);
+    if (r.peekn(1) == ":") {
+        r.getn(1);
+        r.skip_white();
+        this.parser.read_type();
+    }
+    r.skip_white();
+    var result = r.peekn(2) == "=>";
+    r.seek_set(pos);
+    return result;
+}
+
+ExprParser.prototype.parse_vim9_lambda = function(token) {
+    var r = this.reader;
+    var node = Node(NODE_LAMBDA);
+    node.pos = token.pos;
+    node.rlist = [];
+    node.left = NIL;
+    node.body = [];
+    node.rettype = "";
+    while (TRUE) {
+        r.skip_white();
+        if (r.peekn(1) == ")") {
+            r.getn(1);
+            break;
+        }
+        var varnode = Node(NODE_IDENTIFIER);
+        varnode.pos = r.getpos();
+        varnode.value = "";
+        varnode.type_str = "";
+        if (r.peekn(3) == "...") {
+            varnode.value = r.getn(3);
+        }
+        varnode.value += r.read_word();
+        if (r.peekn(1) == ":") {
+            r.getn(1);
+            r.skip_white();
+            varnode.type_str = this.parser.read_type();
+        }
+        viml_add(node.rlist, varnode);
+        r.skip_white();
+        if (r.peekn(1) == ",") {
+            r.getn(1);
+        }
+    }
+    if (r.peekn(1) == ":") {
+        r.getn(1);
+        r.skip_white();
+        node.rettype = this.parser.read_type();
+    }
+    r.skip_white();
+    r.getn(2);
+    r.skip_white();
+    var pos = r.tell();
+    if (r.peekn(1) == "{") {
+        r.getn(1);
+        r.skip_white();
+        if (r.peek() == "<EOL>" || r.peek() == "#") {
+            this.parser.parse_lambda_block(node);
+            return node;
+        }
+        r.seek_set(pos);
+    }
+    node.left = this.parse_expr1();
     return node;
 }
 
@@ -5352,6 +5550,12 @@ Compiler.prototype.compile = function(node) {
         this.compile_vim9script(node);
         return NIL;
     }
+    else if (node.type == NODE_TUPLE) {
+        return this.compile_tuple(node);
+    }
+    else if (node.type == NODE_CAST) {
+        return this.compile_cast(node);
+    }
     else {
         throw viml_printf("Compiler: unknown node: %s", viml_string(node));
     }
@@ -5901,7 +6105,41 @@ Compiler.prototype.escape_string = function(str) {
 
 Compiler.prototype.compile_lambda = function(node) {
     var rlist = node.rlist.map((function(vval) { return this.compile(vval); }).bind(this));
-    return viml_printf("(lambda (%s) %s)", viml_join(rlist, " "), this.compile(node.left));
+    if (node.left !== NIL) {
+        return viml_printf("(lambda (%s) %s)", viml_join(rlist, " "), this.compile(node.left));
+    }
+    // Vim9 lambda with a block: put the statements on one line.
+    var compiler = new Compiler();
+    compiler.compile_body(node.body);
+    var body = [];
+    var __c17 = compiler.lines;
+    for (var __i17 = 0; __i17 < __c17.length; ++__i17) {
+        var line = __c17[__i17];
+        var text = "";
+        var __c18 = viml_split(line, "\\zs");
+        for (var __i18 = 0; __i18 < __c18.length; ++__i18) {
+            var c = __c18[__i18];
+            if (text != "" || c != " ") {
+                text += c;
+            }
+        }
+        viml_add(body, text);
+    }
+    return viml_printf("(lambda (%s) %s)", viml_join(rlist, " "), viml_join(body, " "));
+}
+
+Compiler.prototype.compile_tuple = function(node) {
+    var value = node.value.map((function(vval) { return this.compile(vval); }).bind(this));
+    if (viml_empty(value)) {
+        return "(tuple)";
+    }
+    else {
+        return viml_printf("(tuple %s)", viml_join(value, " "));
+    }
+}
+
+Compiler.prototype.compile_cast = function(node) {
+    return viml_printf("(cast <%s> %s)", node.type_str, this.compile(node.left));
 }
 
 Compiler.prototype.compile_heredoc = function(node) {
@@ -5941,9 +6179,9 @@ Compiler.prototype.compile_def = function(node) {
             viml_remove(rlist, -1);
             var remaining = TRUE;
         }
-        var __c17 = viml_range(viml_len(rlist));
-        for (var __i17 = 0; __i17 < __c17.length; ++__i17) {
-            var i = __c17[__i17];
+        var __c19 = viml_range(viml_len(rlist));
+        for (var __i19 = 0; __i19 < __c19.length; ++__i19) {
+            var i = __c19[__i19];
             if (i < viml_len(rlist) - viml_len(default_args)) {
                 left += viml_printf(" %s", rlist[i]);
             }
@@ -6697,9 +6935,9 @@ RegexpParser.prototype.get_token_sq_char_class = function() {
         var r = this.reader.read_alpha();
         if (this.reader.p(0) == ":" && this.reader.p(1) == "]") {
             this.reader.seek_cur(2);
-            var __c18 = class_names;
-            for (var __i18 = 0; __i18 < __c18.length; ++__i18) {
-                var name = __c18[__i18];
+            var __c20 = class_names;
+            for (var __i20 = 0; __i20 < __c20.length; ++__i20) {
+                var name = __c20[__i20];
                 if (r == name) {
                     return "[:" + name + ":]";
                 }
@@ -6832,9 +7070,9 @@ RegexpParser.prototype.getoctchrs = function() {
 
 RegexpParser.prototype.gethexchrs = function(n) {
     var r = "";
-    var __c19 = viml_range(n);
-    for (var __i19 = 0; __i19 < __c19.length; ++__i19) {
-        var i = __c19[__i19];
+    var __c21 = viml_range(n);
+    for (var __i21 = 0; __i21 < __c21.length; ++__i21) {
+        var i = __c21[__i21];
         var c = this.reader.peek();
         if (!isxdigit(c)) {
             break;

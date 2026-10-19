@@ -320,6 +320,8 @@ NODE_FINAL = 104
 NODE_EXPORT = 105
 NODE_IMPORT = 106
 NODE_VIM9SCRIPT = 107
+NODE_TUPLE = 108
+NODE_CAST = 109
 TOKEN_EOF = 1
 TOKEN_EOL = 2
 TOKEN_SPACE = 3
@@ -391,6 +393,7 @@ TOKEN_DOTDOT = 68
 TOKEN_HEREDOC = 69
 TOKEN_LSHIFT = 70
 TOKEN_RSHIFT = 71
+TOKEN_FATARROW = 72
 MAX_FUNC_ARGS = 20
 # Binary operators that continue a Vim9 expression from the previous line.
 VIM9_CONTINUATION_OPS = AttributeDict({"+": 1, "-": 1, "*": 1, "/": 1, "%": 1, "..": 1, "||": 1, "&&": 1, "??": 1, "?": 1, ":": 1, "<<": 1, ">>": 1, "==": 1, "==?": 1, "==#": 1, "!=": 1, "!=?": 1, "!=#": 1, ">=": 1, ">=?": 1, ">=#": 1, "<=": 1, "<=?": 1, "<=#": 1, "=~": 1, "=~?": 1, "=~#": 1, "!~": 1, "!~?": 1, "!~#": 1, ">": 1, ">?": 1, ">#": 1, "<": 1, "<?": 1, "<#": 1})
@@ -597,7 +600,7 @@ def ExArg():
 # REG .value
 # CURLYNAMEPART .value
 # CURLYNAMEEXPR .value
-# LAMBDA .rlist .left
+# LAMBDA .rlist .left .body .rettype
 # HEREDOC .rlist .op .body
 # DEF .ea .body .left .rlist .default_args .attr .enddef
 # ENDDEF .ea
@@ -606,6 +609,8 @@ def ExArg():
 # EXPORT .ea .body
 # IMPORT .ea .str .left
 # VIM9SCRIPT .ea .noclear
+# TUPLE .value
+# CAST .type_str .left
 def Node(type):
     return AttributeDict({"type": type})
 
@@ -628,7 +633,7 @@ class VimLParser:
     # legacy :function bodies.
     def isvim9(self):
         for node in self.context:
-            if node.type == NODE_DEF:
+            if node.type == NODE_DEF or node.type == NODE_LAMBDA:
                 return TRUE
             elif node.type == NODE_FUNCTION:
                 return FALSE
@@ -1524,7 +1529,7 @@ class VimLParser:
         self.add_node(node)
 
     def parse_cmd_return(self):
-        if self.find_context(NODE_FUNCTION) == -1 and self.find_context(NODE_DEF) == -1:
+        if self.find_context(NODE_FUNCTION) == -1 and self.find_context(NODE_DEF) == -1 and self.find_context(NODE_LAMBDA) == -1:
             raise VimLParserException(Err("E133: :return not inside a function", self.ea.cmdpos))
         node = Node(NODE_RETURN)
         node.pos = self.ea.cmdpos
@@ -1849,6 +1854,30 @@ class VimLParser:
                 self.reader.skip_white()
                 type_str += self.read_type()
         return type_str
+
+    # Parse the statements of a Vim9 lambda "(args) => {", up to the "}" at the
+    # start of a line.  Only a comment may follow the "{".
+    def parse_lambda_block(self, node):
+        ea = self.ea
+        self.reader.skip_white()
+        if self.reader.peek() == "#":
+            self.reader.getn(-1)
+        if self.reader.peek() != "<EOL>":
+            raise VimLParserException(Err(viml_printf("E488: Trailing characters: %s", self.reader.peekline()), self.reader.getpos()))
+        self.reader.get()
+        self.push_context(node)
+        while TRUE:
+            if self.reader.peek() == "<EOF>":
+                raise VimLParserException(Err("E1171: Missing } after inline function", self.reader.getpos()))
+            pos = self.reader.tell()
+            self.reader.skip_white()
+            if self.context[0] is node and self.reader.peek() == "}":
+                self.reader.get()
+                break
+            self.reader.seek_set(pos)
+            self.parse_one_cmd()
+        self.pop_context()
+        self.ea = ea
 
     def parse_cmd_enddef(self):
         self.check_missing_endif("ENDDEF", self.ea.cmdpos)
@@ -2611,6 +2640,9 @@ class ExprTokenizer:
         elif c == "&" and r.p(1) == "&":
             r.seek_cur(2)
             return self.token(TOKEN_ANDAND, "&&", pos)
+        elif c == "=" and r.p(1) == ">" and self.vim9:
+            r.seek_cur(2)
+            return self.token(TOKEN_FATARROW, "=>", pos)
         elif c == "=" and r.p(1) == "=":
             if r.p(2) == "?":
                 r.seek_cur(3)
@@ -3260,6 +3292,16 @@ class ExprParser:
             node.pos = token.pos
             node.left = self.parse_expr7()
             return node
+        elif token.type == TOKEN_LT and self.vim9 and not viml_equalci(self.reader.peekn(4), "SID>"):
+            # Vim9 type cast: <type>expr
+            node = Node(NODE_CAST)
+            node.pos = token.pos
+            node.type_str = self.parser.read_type()
+            token = self.tokenizer.get()
+            if token.type != TOKEN_GT:
+                raise VimLParserException(Err(viml_printf("unexpected token: %s", token.value), token.pos))
+            node.left = self.parse_expr7()
+            return node
         else:
             self.reader.seek_set(pos)
             node = self.parse_expr8()
@@ -3548,6 +3590,8 @@ class ExprParser:
                 else:
                     raise VimLParserException(Err(viml_printf("unexpected token: %s", token.value), token.pos))
             return node
+        elif token.type == TOKEN_POPEN and self.vim9:
+            node = self.parse_vim9_paren(token)
         elif token.type == TOKEN_POPEN:
             self.tokenizer.depth += 1
             node = self.parse_expr1()
@@ -3582,6 +3626,124 @@ class ExprParser:
             node.value = token.value
         else:
             raise VimLParserException(Err(viml_printf("unexpected token: %s", token.value), token.pos))
+        return node
+
+    # Vim9 lambda, tuple or expression in parentheses, after the "(":
+    #   (args) => expr1
+    #   (args): type => {
+    #   ()  (expr1,)  (expr1, expr1, ...)
+    #   (expr1)
+    def parse_vim9_paren(self, token):
+        if self.is_vim9_lambda():
+            return self.parse_vim9_lambda(token)
+        self.tokenizer.depth += 1
+        token = self.tokenizer.peek()
+        if token.type == TOKEN_PCLOSE:
+            self.tokenizer.get()
+            self.tokenizer.depth -= 1
+            node = Node(NODE_TUPLE)
+            node.pos = token.pos
+            node.value = []
+            return node
+        node = self.parse_expr1()
+        token = self.tokenizer.get()
+        if token.type == TOKEN_COMMA:
+            tuple = Node(NODE_TUPLE)
+            tuple.pos = token.pos
+            tuple.value = [node]
+            while self.tokenizer.peek().type != TOKEN_PCLOSE:
+                viml_add(tuple.value, self.parse_expr1())
+                token = self.tokenizer.peek()
+                if token.type == TOKEN_COMMA:
+                    self.tokenizer.get()
+                elif token.type != TOKEN_PCLOSE:
+                    raise VimLParserException(Err(viml_printf("unexpected token: %s", token.value), token.pos))
+            token = self.tokenizer.get()
+            node = tuple
+        self.tokenizer.depth -= 1
+        if token.type != TOKEN_PCLOSE:
+            raise VimLParserException(Err(viml_printf("unexpected token: %s", token.value), token.pos))
+        return node
+
+    # Return TRUE when the text after "(" is the argument list of a Vim9 lambda,
+    # i.e. names with optional types, ")", an optional return type and "=>".
+    def is_vim9_lambda(self):
+        r = self.reader
+        pos = r.tell()
+        result = FALSE
+        while TRUE:
+            r.skip_white()
+            if r.peekn(1) == ")":
+                break
+            if r.peekn(3) == "...":
+                r.getn(3)
+            if r.read_word() == "":
+                r.seek_set(pos)
+                return FALSE
+            if r.peekn(1) == ":":
+                r.getn(1)
+                r.skip_white()
+                self.parser.read_type()
+            r.skip_white()
+            if r.peekn(1) == ",":
+                r.getn(1)
+            elif r.peekn(1) != ")":
+                r.seek_set(pos)
+                return FALSE
+        r.getn(1)
+        if r.peekn(1) == ":":
+            r.getn(1)
+            r.skip_white()
+            self.parser.read_type()
+        r.skip_white()
+        result = r.peekn(2) == "=>"
+        r.seek_set(pos)
+        return result
+
+    def parse_vim9_lambda(self, token):
+        r = self.reader
+        node = Node(NODE_LAMBDA)
+        node.pos = token.pos
+        node.rlist = []
+        node.left = NIL
+        node.body = []
+        node.rettype = ""
+        while TRUE:
+            r.skip_white()
+            if r.peekn(1) == ")":
+                r.getn(1)
+                break
+            varnode = Node(NODE_IDENTIFIER)
+            varnode.pos = r.getpos()
+            varnode.value = ""
+            varnode.type_str = ""
+            if r.peekn(3) == "...":
+                varnode.value = r.getn(3)
+            varnode.value += r.read_word()
+            if r.peekn(1) == ":":
+                r.getn(1)
+                r.skip_white()
+                varnode.type_str = self.parser.read_type()
+            viml_add(node.rlist, varnode)
+            r.skip_white()
+            if r.peekn(1) == ",":
+                r.getn(1)
+        if r.peekn(1) == ":":
+            r.getn(1)
+            r.skip_white()
+            node.rettype = self.parser.read_type()
+        r.skip_white()
+        r.getn(2)
+        r.skip_white()
+        pos = r.tell()
+        if r.peekn(1) == "{":
+            r.getn(1)
+            r.skip_white()
+            if r.peek() == "<EOL>" or r.peek() == "#":
+                self.parser.parse_lambda_block(node)
+                return node
+            r.seek_set(pos)
+        node.left = self.parse_expr1()
         return node
 
     # Vim9 dictionary: {key: expr1, "key": expr1, [expr1]: expr1, ...}
@@ -4294,6 +4456,10 @@ class Compiler:
         elif node.type == NODE_VIM9SCRIPT:
             self.compile_vim9script(node)
             return NIL
+        elif node.type == NODE_TUPLE:
+            return self.compile_tuple(node)
+        elif node.type == NODE_CAST:
+            return self.compile_cast(node)
         else:
             raise VimLParserException(viml_printf("Compiler: unknown node: %s", viml_string(node)))
         return NIL
@@ -4704,7 +4870,29 @@ class Compiler:
 
     def compile_lambda(self, node):
         rlist = [self.compile(vval) for vval in node.rlist]
-        return viml_printf("(lambda (%s) %s)", viml_join(rlist, " "), self.compile(node.left))
+        if node.left is not NIL:
+            return viml_printf("(lambda (%s) %s)", viml_join(rlist, " "), self.compile(node.left))
+        # Vim9 lambda with a block: put the statements on one line.
+        compiler = Compiler()
+        compiler.compile_body(node.body)
+        body = []
+        for line in compiler.lines:
+            text = ""
+            for c in viml_split(line, "\\zs"):
+                if text != "" or c != " ":
+                    text += c
+            viml_add(body, text)
+        return viml_printf("(lambda (%s) %s)", viml_join(rlist, " "), viml_join(body, " "))
+
+    def compile_tuple(self, node):
+        value = [self.compile(vval) for vval in node.value]
+        if viml_empty(value):
+            return "(tuple)"
+        else:
+            return viml_printf("(tuple %s)", viml_join(value, " "))
+
+    def compile_cast(self, node):
+        return viml_printf("(cast <%s> %s)", node.type_str, self.compile(node.left))
 
     def compile_heredoc(self, node):
         if viml_empty(node.rlist):
