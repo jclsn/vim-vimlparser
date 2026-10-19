@@ -154,6 +154,9 @@ let s:NODE_IMPORT = 106
 let s:NODE_VIM9SCRIPT = 107
 let s:NODE_TUPLE = 108
 let s:NODE_CAST = 109
+let s:NODE_ASSIGN = 110
+let s:NODE_BLOCK = 111
+let s:NODE_ENDBLOCK = 112
 
 let s:TOKEN_EOF = 1
 let s:TOKEN_EOL = 2
@@ -419,7 +422,7 @@ endfunction
 " SUBSCRIPT .left .right
 " SLICE .left .rlist
 " METHOD .left .right
-" CALL .left .rlist
+" CALL .left .rlist [.type_args]
 " DOT .left .right
 " NUMBER .value
 " STRING .value
@@ -443,6 +446,9 @@ endfunction
 " EXPORT .ea .body
 " IMPORT .ea .str .left
 " VIM9SCRIPT .ea .noclear
+" ASSIGN .ea .op .left .list .rest .right
+" BLOCK .ea .body .endblock
+" ENDBLOCK .ea
 " TUPLE .value
 " CAST .type_str .left
 function! s:Node(type) abort
@@ -483,6 +489,12 @@ function! s:VimLParser.isvim9() abort
     endif
   endfor
   return self.vim9script
+endfunction
+
+function! s:VimLParser.declare(node) abort
+  if a:node isnot# s:NIL && a:node.type ==# s:NODE_IDENTIFIER
+    let self.declared[a:node.value] = 1
+  endif
 endfunction
 
 function! s:VimLParser.push_context(node) abort
@@ -550,6 +562,9 @@ function! s:VimLParser.parse(reader) abort
   let toplevel = s:Node(s:NODE_TOPLEVEL)
   let toplevel.pos = self.reader.getpos()
   let toplevel.body = []
+  " Names of declared Vim9 variables, to tell an assignment from an Ex
+  " command.
+  let self.declared = {}
   call self.push_context(toplevel)
   while self.reader.peek() !=# '<EOF>'
     call self.parse_one_cmd()
@@ -560,6 +575,9 @@ function! s:VimLParser.parse(reader) abort
   call self.check_missing_endtry('TOPLEVEL', self.reader.getpos())
   call self.check_missing_endwhile('TOPLEVEL', self.reader.getpos())
   call self.check_missing_endfor('TOPLEVEL', self.reader.getpos())
+  if self.context[0].type ==# s:NODE_BLOCK
+    throw s:Err('E1026: Missing }', self.reader.getpos())
+  endif
   call self.pop_context()
   return toplevel
 endfunction
@@ -572,7 +590,14 @@ function! s:VimLParser.parse_one_cmd() abort
     call self.reader.get()
     return
   endif
-  call self.reader.skip_white_and_colon()
+  let vim9 = self.isvim9()
+  let colon = s:FALSE
+  while s:iswhite(self.reader.peekn(1)) || self.reader.peekn(1) ==# ':'
+    if self.reader.peekn(1) ==# ':'
+      let colon = s:TRUE
+    endif
+    call self.reader.seek_cur(1)
+  endwhile
   if self.reader.peekn(1) ==# ''
     call self.reader.get()
     return
@@ -589,9 +614,254 @@ function! s:VimLParser.parse_one_cmd() abort
   endif
   let self.ea.linepos = self.reader.getpos()
   call self.parse_command_modifiers()
-  call self.parse_range()
+  if vim9
+    " In Vim9 script a range must be preceded by a colon, without it the line
+    " may be an expression or assignment.
+    call self.reader.skip_white()
+    if self.reader.peekn(1) ==# ':'
+      let colon = s:TRUE
+    endif
+    if colon
+      call self.parse_range()
+    elseif self.parse_vim9_statement()
+      call self.parse_trail()
+      return
+    endif
+  else
+    call self.parse_range()
+  endif
   call self.parse_command()
   call self.parse_trail()
+endfunction
+
+" Recognize a Vim9 expression or assignment without :eval, :call or :let,
+" like find_ex_command() in Vim.  Return TRUE when the line was parsed.
+function! s:VimLParser.parse_vim9_statement() abort
+  let r = self.reader
+  let pos = r.tell()
+  let self.ea.cmdpos = r.getpos()
+  let c = r.peekn(1)
+  if c ==# '{'
+    " "{" by itself is the start of a block.
+    call r.getn(1)
+    call r.skip_white()
+    let block = self.ends_excmds(r.peek())
+    call r.seek_set(pos)
+    if block
+      return s:FALSE
+    endif
+    call self.parse_vim9_expr_cmd()
+    return s:TRUE
+  elseif c ==# '(' || c ==# "'" || c ==# '"' || (c ==# '$' && (r.p(1) ==# "'" || r.p(1) ==# '"')) || (c ==# '0' && r.p(1) ==# 'z')
+    call self.parse_vim9_expr_cmd()
+    return s:TRUE
+  elseif c ==# '['
+    if self.is_vim9_list_assign()
+      call self.parse_vim9_assign()
+    else
+      call self.parse_vim9_expr_cmd()
+    endif
+    return s:TRUE
+  elseif c ==# '&' || c ==# '$' || (c ==# '@' && r.p(1) !=# '<EOL>')
+    call self.parse_vim9_assign_or_expr()
+    return s:TRUE
+  elseif (c ==# '+' || c ==# '-') && r.p(1) ==# c
+    call self.parse_vim9_increment()
+    return s:TRUE
+  elseif s:isdigit(c)
+    call r.read_digit()
+    call r.skip_white()
+    let method = r.peekn(2) ==# '->'
+    call r.seek_set(pos)
+    if method
+      call self.parse_vim9_expr_cmd()
+    endif
+    return method
+  elseif !s:iswordc1(c)
+    return s:FALSE
+  endif
+  let name = r.read_vim9_name()
+  let c = r.peekn(1)
+  if c ==# '(' || (c ==# '<' && self.is_generic_args())
+    " "funcname(" is always a function call.
+    call r.seek_set(pos)
+    call self.parse_vim9_expr_cmd()
+    return s:TRUE
+  elseif stridx(name, ':') ==# 1 || c ==# '[' || (c ==# '.' && s:iswordc1(r.p(1)))
+    " "g:name", "name[idx]" and "name.member" start an expression or
+    " assignment.
+    call r.seek_set(pos)
+    call self.parse_vim9_assign_or_expr()
+    return s:TRUE
+  endif
+  call r.skip_white()
+  let result = s:FALSE
+  if r.peekn(2) ==# '->'
+    let result = s:TRUE
+  elseif self.peek_assign_op() !=# ''
+    " "name = expr" is an assignment when "name" is a variable or not a
+    " command.
+    let result = has_key(self.declared, name) || self.is_vim9_command(pos) ==# s:FALSE
+  elseif self.ends_excmds(r.peek())
+    " A variable followed by an operator on the next line.
+    let result = has_key(self.declared, name)
+  endif
+  call r.seek_set(pos)
+  if result
+    call self.parse_vim9_assign_or_expr()
+  endif
+  return result
+endfunction
+
+" Return TRUE when the text at reader position "pos" is an Ex command that
+" exists in Vim9 script.
+function! s:VimLParser.is_vim9_command(pos) abort
+  let pos = self.reader.tell()
+  call self.reader.seek_set(a:pos)
+  let cmd = self.find_command()
+  call self.reader.seek_set(pos)
+  if cmd is# s:NIL
+    return s:FALSE
+  endif
+  let name = cmd.name
+  return name !=# 'append' && name !=# 'change' && name !=# 'insert' && name !=# 'k' && name !=# 'mode'
+        \ && name !=# 'open' && name !=# 't' && name !=# 'xit' && name !=# 'Print'
+endfunction
+
+" Return the assignment operator at the cursor, or an empty string.
+function! s:VimLParser.peek_assign_op() abort
+  let s3 = self.reader.peekn(3)
+  let s2 = self.reader.peekn(2)
+  let op = ''
+  if s3 ==# '..=' || s3 ==# '=<<'
+    let op = s3
+  elseif s2 ==# '+=' || s2 ==# '-=' || s2 ==# '*=' || s2 ==# '/=' || s2 ==# '%=' || s2 ==# '.='
+    let op = s2
+  elseif s2 ==# '==' || s2 ==# '=~' || s2 ==# '=>'
+    return ''
+  elseif self.reader.peekn(1) ==# '='
+    let op = '='
+  endif
+  return op
+endfunction
+
+" Return TRUE when the generic type arguments of a function call follow:
+" "<type, ...>(".
+function! s:VimLParser.is_generic_args() abort
+  let r = self.reader
+  let pos = r.tell()
+  call r.getn(1)
+  let depth = 1
+  while depth > 0
+    let c = r.peekn(1)
+    if c ==# '<'
+      let depth += 1
+    elseif c ==# '>'
+      let depth -= 1
+    elseif !s:iswordc(c) && c !=# ',' && c !=# ' ' && c !=# '(' && c !=# ')' && c !=# ':' && c !=# '.'
+      call r.seek_set(pos)
+      return s:FALSE
+    endif
+    call r.getn(1)
+  endwhile
+  let result = r.peekn(1) ==# '('
+  call r.seek_set(pos)
+  return result
+endfunction
+
+" Return TRUE when "[a, b] =" follows: the list is closed on this line and
+" followed by an assignment operator.
+function! s:VimLParser.is_vim9_list_assign() abort
+  let r = self.reader
+  let pos = r.tell()
+  let depth = 0
+  while s:TRUE
+    let c = r.peekn(1)
+    if c ==# ''
+      call r.seek_set(pos)
+      return s:FALSE
+    endif
+    call r.getn(1)
+    if c ==# '['
+      let depth += 1
+    elseif c ==# ']'
+      let depth -= 1
+      if depth ==# 0
+        break
+      endif
+    elseif c ==# "'" || c ==# '"'
+      while r.peekn(1) !=# '' && r.peekn(1) !=# c
+        call r.getn(1)
+      endwhile
+      call r.getn(1)
+    endif
+  endwhile
+  call r.skip_white()
+  let op = self.peek_assign_op()
+  call r.seek_set(pos)
+  return op !=# '' && op !=# '=<<'
+endfunction
+
+" Vim9 expression used as a command.  A function call is like :call, any
+" other expression is like :eval.
+function! s:VimLParser.parse_vim9_expr_cmd() abort
+  let left = self.parse_expr()
+  if left.type ==# s:NODE_CALL
+    let node = s:Node(s:NODE_EXCALL)
+  else
+    let node = s:Node(s:NODE_EVAL)
+  endif
+  let node.pos = self.ea.cmdpos
+  let node.ea = self.ea
+  let node.left = left
+  call self.add_node(node)
+endfunction
+
+function! s:VimLParser.parse_vim9_assign_or_expr() abort
+  let pos = self.reader.tell()
+  call self.parse_lvalue()
+  call self.reader.skip_white()
+  let op = self.peek_assign_op()
+  call self.reader.seek_set(pos)
+  if op ==# ''
+    call self.parse_vim9_expr_cmd()
+  else
+    call self.parse_vim9_assign()
+  endif
+endfunction
+
+" Vim9 assignment without :let: "name = expr", "[a, b] = expr", "name += expr"
+function! s:VimLParser.parse_vim9_assign() abort
+  let lhs = self.parse_letlhs()
+  call self.reader.skip_white()
+  let node = s:Node(s:NODE_ASSIGN)
+  let node.pos = self.ea.cmdpos
+  let node.ea = self.ea
+  let node.op = self.peek_assign_op()
+  let node.left = lhs.left
+  let node.list = lhs.list
+  let node.rest = lhs.rest
+  call self.reader.getn(len(node.op))
+  if node.op ==# '=<<'
+    call self.reader.skip_white()
+    let node.right = self.parse_heredoc(self.heredoc_prefix())
+  else
+    let node.right = self.parse_expr()
+  endif
+  call self.add_node(node)
+endfunction
+
+" Vim9 "++var" and "--var"
+function! s:VimLParser.parse_vim9_increment() abort
+  let node = s:Node(s:NODE_ASSIGN)
+  let node.pos = self.ea.cmdpos
+  let node.ea = self.ea
+  let node.op = self.reader.getn(2)
+  let node.left = self.parse_lvalue()
+  let node.list = s:NIL
+  let node.rest = s:NIL
+  let node.right = s:NIL
+  call self.add_node(node)
 endfunction
 
 " FIXME:
@@ -607,7 +877,11 @@ function! s:VimLParser.parse_command_modifiers() abort
     let k = self.reader.read_alpha()
     let c = self.reader.peekn(1)
     call self.reader.skip_white()
-    if stridx('aboveleft', k) ==# 0 && len(k) >= 3 " abo\%[veleft]
+    if self.isvim9() && (c ==# '(' || c ==# '[' || c ==# '.' || c ==# ':' || self.peek_assign_op() !=# '' || self.reader.peekn(2) ==# '->')
+      " A Vim9 variable or function, not a modifier.
+      call self.reader.seek_set(pos)
+      break
+    elseif stridx('aboveleft', k) ==# 0 && len(k) >= 3 " abo\%[veleft]
       call add(modifiers, {'name': 'aboveleft'})
     elseif stridx('belowright', k) ==# 0 && len(k) >= 3 " bel\%[owright]
       call add(modifiers, {'name': 'belowright'})
@@ -992,6 +1266,10 @@ function! s:VimLParser._parse_command(parser) abort
     call self.parse_cmd_export()
   elseif a:parser ==# 'parse_cmd_import'
     call self.parse_cmd_import()
+  elseif a:parser ==# 'parse_cmd_block'
+    call self.parse_cmd_block()
+  elseif a:parser ==# 'parse_cmd_endblock'
+    call self.parse_cmd_endblock()
   else
     throw printf('unknown parser: %s', string(a:parser))
   endif
@@ -1007,7 +1285,7 @@ function! s:VimLParser.find_command() abort
   elseif c ==# 's' && self.reader.peekn(5) =~# '\v^s%(c[^sr][^i][^p]|g|i[^mlg]|I|r[^e])'
     call self.reader.getn(1)
     let name = 'substitute'
-  elseif c =~# '[@*!=><&~#]'
+  elseif c =~# '[@*!=><&~#]' || c ==# '{' || c ==# '}'
     call self.reader.getn(1)
     let name = c
   elseif self.reader.peekn(2) ==# 'py'
@@ -1689,31 +1967,7 @@ function! s:VimLParser.parse_cmd_let() abort
     call self.reader.getn(len(s2))
     call self.reader.skip_white()
     let node.op = s2
-
-    " compute allowed prefix for heredoc end marker (e.g. EOF)
-    let pos = self.reader.tell()
-    while self.reader.tell() > 0
-      if self.reader.peek() ==# '<EOL>'
-        call self.reader.seek_cur(1)
-        break
-      endif
-      call self.reader.seek_cur(-1)
-    endwhile
-    let prefix = ''
-    while s:TRUE
-      let c = self.reader.getn(1)
-      if c ==# ':'
-        " any presence of leading ':' disables prefix for heredoc end marker
-        let prefix = ''
-        break
-      elseif !s:iswhite(c)
-        break
-      endif
-      let prefix .= c
-    endwhile
-    call self.reader.seek_set(pos)
-
-    let node.right = self.parse_heredoc(prefix)
+    let node.right = self.parse_heredoc(self.heredoc_prefix())
     call self.add_node(node)
     return
   elseif s1 ==# '='
@@ -1724,6 +1978,33 @@ function! s:VimLParser.parse_cmd_let() abort
   endif
   let node.right = self.parse_expr()
   call self.add_node(node)
+endfunction
+
+" Compute the allowed prefix for a heredoc end marker (e.g. EOF): the indent
+" of the command line.
+function! s:VimLParser.heredoc_prefix() abort
+  let pos = self.reader.tell()
+  while self.reader.tell() > 0
+    if self.reader.peek() ==# '<EOL>'
+      call self.reader.seek_cur(1)
+      break
+    endif
+    call self.reader.seek_cur(-1)
+  endwhile
+  let prefix = ''
+  while s:TRUE
+    let c = self.reader.getn(1)
+    if c ==# ':'
+      " any presence of leading ':' disables prefix for heredoc end marker
+      let prefix = ''
+      break
+    elseif !s:iswhite(c)
+      break
+    endif
+    let prefix .= c
+  endwhile
+  call self.reader.seek_set(pos)
+  return prefix
 endfunction
 
 function! s:VimLParser.parse_cmd_const() abort
@@ -1832,6 +2113,7 @@ function! s:VimLParser.parse_cmd_def() abort
         let vname = self.reader.read_word()
         let varnode.pos = self.reader.getpos()
         let varnode.value = '...' . vname
+        let self.declared[vname] = 1
         " Optionally read type annotation
         call self.reader.skip_white()
         if self.reader.peekn(1) ==# ':'
@@ -1864,6 +2146,7 @@ function! s:VimLParser.parse_cmd_def() abort
       let varnode.pos = npos
       let varnode.value = pname
       call add(node.rlist, varnode)
+      call self.declare(varnode)
       " Check for type annotation
       call self.reader.skip_white()
       if self.reader.peekn(1) ==# ':'
@@ -2062,6 +2345,7 @@ function! s:VimLParser.parse_cmd_var() abort
   let node.rest = s:NIL
   let node.right = s:NIL
   let node.type_str = type_str
+  call self.declare(left)
   if s2 ==# '+=' || s2 ==# '-=' || s2 ==# '.=' || s2 ==# '..=' || s2 ==# '*=' || s2 ==# '/=' || s2 ==# '%='
     call self.reader.getn(len(s2))
     let node.op = s2
@@ -2128,6 +2412,7 @@ function! s:VimLParser.parse_cmd_final() abort
   let node.rest = s:NIL
   let node.right = self.parse_expr()
   let node.type_str = type_str
+  call self.declare(left)
   call self.add_node(node)
 endfunction
 
@@ -2197,6 +2482,40 @@ function! s:VimLParser.parse_cmd_import() abort
   endwhile
   let node.str = line
   call self.add_node(node)
+endfunction
+
+" Vim9 block: "{" ... "}"
+function! s:VimLParser.parse_cmd_block() abort
+  if !self.isvim9()
+    call self.parse_cmd_common()
+    return
+  endif
+  let node = s:Node(s:NODE_BLOCK)
+  let node.pos = self.ea.cmdpos
+  let node.ea = self.ea
+  let node.body = []
+  let node.endblock = s:NIL
+  call self.add_node(node)
+  call self.push_context(node)
+endfunction
+
+function! s:VimLParser.parse_cmd_endblock() abort
+  if !self.isvim9()
+    call self.parse_cmd_common()
+    return
+  endif
+  call self.check_missing_endif('}', self.ea.cmdpos)
+  call self.check_missing_endtry('}', self.ea.cmdpos)
+  call self.check_missing_endwhile('}', self.ea.cmdpos)
+  call self.check_missing_endfor('}', self.ea.cmdpos)
+  if self.context[0].type !=# s:NODE_BLOCK
+    throw s:Err('E1128: } without {', self.ea.cmdpos)
+  endif
+  let node = s:Node(s:NODE_ENDBLOCK)
+  let node.pos = self.ea.cmdpos
+  let node.ea = self.ea
+  let self.context[0].endblock = node
+  call self.pop_context()
 endfunction
 
 function! s:VimLParser.parse_cmd_unlet() abort
@@ -2327,6 +2646,13 @@ function! s:VimLParser.parse_cmd_for() abort
   let node.left = lhs.left
   let node.list = lhs.list
   let node.rest = lhs.rest
+  call self.declare(node.left)
+  if node.list isnot# s:NIL
+    for x in node.list
+      call self.declare(x)
+    endfor
+  endif
+  call self.declare(node.rest)
   call self.reader.skip_white()
   let epos = self.reader.getpos()
   if self.reader.read_alpha() !=# 'in'
@@ -3313,8 +3639,8 @@ let s:VimLParser.builtin_commands = [
       \ {'name': '=', 'minlen': 1, 'flags': 'RANGE|TRLBAR|DFLALL|FLAGS|CMDWIN|LOCK_OK', 'parser': 'parse_cmd_common'},
       \ {'name': '>', 'minlen': 1, 'flags': 'RANGE|WHOLEFOLD|COUNT|FLAGS|TRLBAR|CMDWIN|LOCK_OK|MODIFY', 'parser': 'parse_cmd_common'},
       \ {'name': '@', 'minlen': 1, 'flags': 'RANGE|WHOLEFOLD|EXTRA|TRLBAR|CMDWIN|LOCK_OK|NONWHITE_OK', 'parser': 'parse_cmd_common'},
-      \ {'name': '{', 'minlen': 1, 'flags': 'TRLBAR|LOCK_OK|CMDWIN', 'parser': 'parse_cmd_common'},
-      \ {'name': '}', 'minlen': 1, 'flags': 'TRLBAR|CMDWIN|LOCK_OK', 'parser': 'parse_cmd_common'},
+      \ {'name': '{', 'minlen': 1, 'flags': 'TRLBAR|LOCK_OK|CMDWIN', 'parser': 'parse_cmd_block'},
+      \ {'name': '}', 'minlen': 1, 'flags': 'TRLBAR|CMDWIN|LOCK_OK', 'parser': 'parse_cmd_endblock'},
       \ {'name': '~', 'minlen': 1, 'flags': 'RANGE|WHOLEFOLD|EXTRA|CMDWIN|LOCK_OK|MODIFY|NONWHITE_OK', 'parser': 'parse_cmd_common'},
       \ {'name': 'Next', 'minlen': 1, 'flags': 'EXTRA|RANGE|COUNT|BANG|CMDARG|ARGOPT|TRLBAR', 'parser': 'parse_cmd_common'},
       \ {'name': 'Print', 'minlen': 1, 'flags': 'RANGE|WHOLEFOLD|COUNT|FLAGS|TRLBAR|CMDWIN|LOCK_OK', 'parser': 'parse_cmd_common'},
@@ -4795,7 +5121,29 @@ function! s:ExprParser.parse_expr8() abort
     " In Vim9 script no white space or line break is allowed before "[" and
     " "(", a member "." may start a continuation line.
     let attached = !s:iswhite(c) && !(self.vim9 && c ==# '<EOL>')
-    if attached && token.type ==# s:TOKEN_SQOPEN
+    if self.vim9 && c ==# '<' && self.parser.is_generic_args()
+      " Vim9 generic function call: Func<type, ...>(args)
+      call self.reader.seek_set(pos)
+      let type_args = self.reader.getn(1)
+      let depth = 1
+      while depth > 0
+        let c = self.reader.getn(1)
+        if c ==# '<'
+          let depth += 1
+        elseif c ==# '>'
+          let depth -= 1
+        endif
+        let type_args .= c
+      endwhile
+      let token = self.tokenizer.get()
+      let node = s:Node(s:NODE_CALL)
+      let node.pos = token.pos
+      let node.left = left
+      let node.type_args = type_args
+      let node.rlist = self.parse_rlist()
+      let left = node
+      unlet node
+    elseif attached && token.type ==# s:TOKEN_SQOPEN
       let npos = token.pos
       let self.tokenizer.depth += 1
       if self.tokenizer.peek().type ==# s:TOKEN_COLON
@@ -5250,7 +5598,9 @@ function! s:ExprParser.parse_vim9_lambda(token) abort
     if r.peekn(3) ==# '...'
       let varnode.value = r.getn(3)
     endif
-    let varnode.value .= r.read_word()
+    let name = r.read_word()
+    let varnode.value .= name
+    let self.parser.declared[name] = 1
     if r.peekn(1) ==# ':'
       call r.getn(1)
       call r.skip_white()
@@ -6107,6 +6457,12 @@ function! s:Compiler.compile(node) abort
   elseif a:node.type ==# s:NODE_VIM9SCRIPT
     call self.compile_vim9script(a:node)
     return s:NIL
+  elseif a:node.type ==# s:NODE_ASSIGN
+    call self.compile_assign(a:node)
+    return s:NIL
+  elseif a:node.type ==# s:NODE_BLOCK
+    call self.compile_block(a:node)
+    return s:NIL
   elseif a:node.type ==# s:NODE_TUPLE
     return self.compile_tuple(a:node)
   elseif a:node.type ==# s:NODE_CAST
@@ -6197,6 +6553,32 @@ function! s:Compiler.compile_let(node) abort
   endif
   let right = self.compile(a:node.right)
   call self.out('(let %s %s %s)', a:node.op, left, right)
+endfunction
+
+function! s:Compiler.compile_block(node) abort
+  call self.out('(block')
+  call self.incindent('  ')
+  call self.compile_body(a:node.body)
+  call self.out(')')
+  call self.decindent()
+endfunction
+
+function! s:Compiler.compile_assign(node) abort
+  let left = ''
+  if a:node.left isnot# s:NIL
+    let left = self.compile(a:node.left)
+  else
+    let left = join(map(a:node.list, 'self.compile(v:val)'), ' ')
+    if a:node.rest isnot# s:NIL
+      let left .= ' . ' . self.compile(a:node.rest)
+    endif
+    let left = '(' . left . ')'
+  endif
+  if a:node.right is# s:NIL
+    call self.out('(assign %s %s)', a:node.op, left)
+  else
+    call self.out('(assign %s %s %s)', a:node.op, left, self.compile(a:node.right))
+  endif
 endfunction
 
 " TODO: merge with s:Compiler.compile_let() ?
@@ -6556,10 +6938,14 @@ endfunction
 
 function! s:Compiler.compile_call(node) abort
   let rlist = map(a:node.rlist, 'self.compile(v:val)')
+  let left = self.compile(a:node.left)
+  if has_key(a:node, 'type_args')
+    let left .= a:node.type_args
+  endif
   if empty(rlist)
-    return printf('(%s)', self.compile(a:node.left))
+    return printf('(%s)', left)
   else
-    return printf('(%s %s)', self.compile(a:node.left), join(rlist, ' '))
+    return printf('(%s %s)', left, join(rlist, ' '))
   endif
 endfunction
 
