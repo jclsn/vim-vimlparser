@@ -1899,7 +1899,11 @@ class VimLParser:
         if self.ends_excmds(c):
             raise VimLParserException(Err("E471: Argument required", self.reader.getpos()))
         node.left = self.parse_expr()
-        if node.left.type != NODE_CALL:
+        # A method call may follow the function call: call Func()->Method()
+        base = node.left
+        while base.type == NODE_METHOD:
+            base = base.left
+        if base.type != NODE_CALL:
             raise VimLParserException(Err("Not an function call", node.left.pos))
         self.add_node(node)
 

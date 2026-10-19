@@ -1976,7 +1976,12 @@ function! s:VimLParser.parse_cmd_call() abort
     throw s:Err('E471: Argument required', self.reader.getpos())
   endif
   let node.left = self.parse_expr()
-  if node.left.type !=# s:NODE_CALL
+  " A method call may follow the function call: call Func()->Method()
+  let base = node.left
+  while base.type ==# s:NODE_METHOD
+    let base = base.left
+  endwhile
+  if base.type !=# s:NODE_CALL
     throw s:Err('Not an function call', node.left.pos)
   endif
   call self.add_node(node)
