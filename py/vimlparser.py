@@ -610,7 +610,7 @@ def ExArg():
 # VAR .ea .op .left .list .rest .right .type_str
 # FINAL .ea .op .left .list .rest .right .type_str
 # EXPORT .ea .body
-# IMPORT .ea .str .left
+# IMPORT .ea .str .left .autoload .alias
 # VIM9SCRIPT .ea .noclear
 # ASSIGN .ea .op .left .list .rest .right
 # BLOCK .ea .body .endblock
@@ -2243,37 +2243,36 @@ class VimLParser:
             viml_add(export_node.body, moved_node)
         viml_add(ctx.body, export_node)
 
+    # :import [autoload] {expr} [as {name}]
     def parse_cmd_import(self):
         node = Node(NODE_IMPORT)
         node.pos = self.ea.cmdpos
         node.ea = self.ea
-        node.left = NIL
-        node.str = ""
+        node.autoload = FALSE
+        node.alias = ""
         self.reader.skip_white()
-        # Read the rest of the import line, stopping at a trailing comment.
-        line = ""
-        pending_ws = ""
-        last_was_white = FALSE
-        while TRUE:
-            c = self.reader.peekn(1)
-            if c == "":
-                break
-            if c == "#" and last_was_white:
-                # Consume the rest of the line, so parse_trail doesn't see it.
-                self.reader.getn(-1)
-                break
-            self.reader.getn(1)
-            if iswhite(c):
-                pending_ws += c
-                last_was_white = TRUE
-            else:
-                line += pending_ws + c
-                pending_ws = ""
-                last_was_white = FALSE
-        node.str = line
+        start = self.reader.getpos()
+        pos = self.reader.tell()
+        if self.reader.read_alpha() == "autoload" and iswhite(self.reader.peekn(1)):
+            node.autoload = TRUE
+            self.reader.skip_white()
+        else:
+            self.reader.seek_set(pos)
+        node.left = self.parse_expr()
+        end = self.reader.getpos()
+        self.reader.skip_white()
+        pos = self.reader.tell()
+        if self.reader.read_alpha() == "as" and iswhite(self.reader.peekn(1)):
+            self.reader.skip_white()
+            node.alias = self.reader.read_word()
+            self.declared[node.alias] = 1
+            end = self.reader.getpos()
+        else:
+            self.reader.seek_set(pos)
+        # The text of the arguments.
+        node.str = self.reader.getstr(start, end)
         self.add_node(node)
 
-    # Vim9 block: "{" ... "}"
     def parse_cmd_block(self):
         if not self.isvim9():
             self.parse_cmd_common()
@@ -5297,7 +5296,12 @@ class Compiler:
         self.decindent()
 
     def compile_import(self, node):
-        self.out("(import \"%s\")", viml_escape(node.str, "\\\""))
+        s = self.compile(node.left)
+        if node.autoload:
+            s = "autoload " + s
+        if node.alias != "":
+            s += " as " + node.alias
+        self.out("(import %s)", s)
 
 
 # TODO: under construction

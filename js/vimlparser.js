@@ -621,7 +621,7 @@ function ExArg() {
 // VAR .ea .op .left .list .rest .right .type_str
 // FINAL .ea .op .left .list .rest .right .type_str
 // EXPORT .ea .body
-// IMPORT .ea .str .left
+// IMPORT .ea .str .left .autoload .alias
 // VIM9SCRIPT .ea .noclear
 // ASSIGN .ea .op .left .list .rest .right
 // BLOCK .ea .body .endblock
@@ -2750,43 +2750,41 @@ VimLParser.prototype.parse_cmd_export = function() {
     viml_add(ctx.body, export_node);
 }
 
+// :import [autoload] {expr} [as {name}]
 VimLParser.prototype.parse_cmd_import = function() {
     var node = Node(NODE_IMPORT);
     node.pos = this.ea.cmdpos;
     node.ea = this.ea;
-    node.left = NIL;
-    node.str = "";
+    node.autoload = FALSE;
+    node.alias = "";
     this.reader.skip_white();
-    // Read the rest of the import line, stopping at a trailing comment.
-    var line = "";
-    var pending_ws = "";
-    var last_was_white = FALSE;
-    while (TRUE) {
-        var c = this.reader.peekn(1);
-        if (c == "") {
-            break;
-        }
-        if (c == "#" && last_was_white) {
-            // Consume the rest of the line, so parse_trail doesn't see it.
-            this.reader.getn(-1);
-            break;
-        }
-        this.reader.getn(1);
-        if (iswhite(c)) {
-            pending_ws += c;
-            var last_was_white = TRUE;
-        }
-        else {
-            line += pending_ws + c;
-            var pending_ws = "";
-            var last_was_white = FALSE;
-        }
+    var start = this.reader.getpos();
+    var pos = this.reader.tell();
+    if (this.reader.read_alpha() == "autoload" && iswhite(this.reader.peekn(1))) {
+        node.autoload = TRUE;
+        this.reader.skip_white();
     }
-    node.str = line;
+    else {
+        this.reader.seek_set(pos);
+    }
+    node.left = this.parse_expr();
+    var end = this.reader.getpos();
+    this.reader.skip_white();
+    var pos = this.reader.tell();
+    if (this.reader.read_alpha() == "as" && iswhite(this.reader.peekn(1))) {
+        this.reader.skip_white();
+        node.alias = this.reader.read_word();
+        this.declared[node.alias] = 1;
+        var end = this.reader.getpos();
+    }
+    else {
+        this.reader.seek_set(pos);
+    }
+    // The text of the arguments.
+    node.str = this.reader.getstr(start, end);
     this.add_node(node);
 }
 
-// Vim9 block: "{" ... "}"
 VimLParser.prototype.parse_cmd_block = function() {
     if (!this.isvim9()) {
         this.parse_cmd_common();
@@ -6672,7 +6670,14 @@ Compiler.prototype.compile_export = function(node) {
 }
 
 Compiler.prototype.compile_import = function(node) {
-    this.out("(import \"%s\")", viml_escape(node.str, "\\\""));
+    var s = this.compile(node.left);
+    if (node.autoload) {
+        var s = "autoload " + s;
+    }
+    if (node.alias != "") {
+        s += " as " + node.alias;
+    }
+    this.out("(import %s)", s);
 }
 
 // TODO: under construction

@@ -444,7 +444,7 @@ endfunction
 " VAR .ea .op .left .list .rest .right .type_str
 " FINAL .ea .op .left .list .rest .right .type_str
 " EXPORT .ea .body
-" IMPORT .ea .str .left
+" IMPORT .ea .str .left .autoload .alias
 " VIM9SCRIPT .ea .noclear
 " ASSIGN .ea .op .left .list .rest .right
 " BLOCK .ea .body .endblock
@@ -2418,42 +2418,39 @@ function! s:VimLParser.parse_cmd_export() abort
   call add(ctx.body, export_node)
 endfunction
 
+" :import [autoload] {expr} [as {name}]
 function! s:VimLParser.parse_cmd_import() abort
   let node = s:Node(s:NODE_IMPORT)
   let node.pos = self.ea.cmdpos
   let node.ea = self.ea
-  let node.left = s:NIL
-  let node.str = ''
+  let node.autoload = s:FALSE
+  let node.alias = ''
   call self.reader.skip_white()
-  " Read the rest of the import line, stopping at a trailing comment.
-  let line = ''
-  let pending_ws = ''
-  let last_was_white = s:FALSE
-  while s:TRUE
-    let c = self.reader.peekn(1)
-    if c ==# ''
-      break
-    endif
-    if c ==# '#' && last_was_white
-      " Consume the rest of the line, so parse_trail doesn't see it.
-      call self.reader.getn(-1)
-      break
-    endif
-    call self.reader.getn(1)
-    if s:iswhite(c)
-      let pending_ws .= c
-      let last_was_white = s:TRUE
-    else
-      let line .= pending_ws . c
-      let pending_ws = ''
-      let last_was_white = s:FALSE
-    endif
-  endwhile
-  let node.str = line
+  let start = self.reader.getpos()
+  let pos = self.reader.tell()
+  if self.reader.read_alpha() ==# 'autoload' && s:iswhite(self.reader.peekn(1))
+    let node.autoload = s:TRUE
+    call self.reader.skip_white()
+  else
+    call self.reader.seek_set(pos)
+  endif
+  let node.left = self.parse_expr()
+  let end = self.reader.getpos()
+  call self.reader.skip_white()
+  let pos = self.reader.tell()
+  if self.reader.read_alpha() ==# 'as' && s:iswhite(self.reader.peekn(1))
+    call self.reader.skip_white()
+    let node.alias = self.reader.read_word()
+    let self.declared[node.alias] = 1
+    let end = self.reader.getpos()
+  else
+    call self.reader.seek_set(pos)
+  endif
+  " The text of the arguments.
+  let node.str = self.reader.getstr(start, end)
   call self.add_node(node)
 endfunction
 
-" Vim9 block: "{" ... "}"
 function! s:VimLParser.parse_cmd_block() abort
   if !self.isvim9()
     call self.parse_cmd_common()
@@ -7147,7 +7144,14 @@ function! s:Compiler.compile_export(node) abort
 endfunction
 
 function! s:Compiler.compile_import(node) abort
-  call self.out('(import "%s")', escape(a:node.str, '\"'))
+  let s = self.compile(a:node.left)
+  if a:node.autoload
+    let s = 'autoload ' . s
+  endif
+  if a:node.alias !=# ''
+    let s .= ' as ' . a:node.alias
+  endif
+  call self.out('(import %s)', s)
 endfunction
 
 " TODO: under construction
