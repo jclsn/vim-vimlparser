@@ -479,6 +479,19 @@ def islower(c):
     return viml_eqregh(c, "^[a-z]$")
 
 
+# Return TRUE when the text ends in white space and "{".
+def ends_with_block(str):
+    last = ""
+    prev = ""
+    for c in viml_split(str, "\\zs"):
+        if not iswhite(c):
+            prev = last
+            last = c
+        elif last != "":
+            last = " "
+    return last == "{" and (prev == " " or prev == "")
+
+
 def ExArg():
     ea = AttributeDict({})
     ea.forceit = FALSE
@@ -526,7 +539,7 @@ def ExArg():
 # }
 # TOPLEVEL .body
 # COMMENT .str
-# EXCMD .ea .str
+# EXCMD .ea .str [.block]
 # FUNCTION .ea .body .left .rlist .default_args .attr .endfunction
 # ENDFUNCTION .ea
 # DELFUNCTION .ea .left
@@ -676,7 +689,7 @@ class VimLParser:
         if self.vim9cmd != -1:
             return self.vim9cmd
         for node in self.context:
-            if node.type == NODE_DEF or node.type == NODE_LAMBDA or node.type == NODE_CLASS or node.type == NODE_INTERFACE or node.type == NODE_ENUM:
+            if node.type == NODE_DEF or node.type == NODE_LAMBDA or node.type == NODE_BLOCK or node.type == NODE_CLASS or node.type == NODE_INTERFACE or node.type == NODE_ENUM:
                 return TRUE
             elif node.type == NODE_FUNCTION:
                 return FALSE
@@ -1572,6 +1585,16 @@ class VimLParser:
         node.ea = self.ea
         node.str = self.reader.getstr(self.ea.linepos, end)
         self.add_node(node)
+        if (self.ea.cmd.name == "command" or self.ea.cmd.name == "autocmd") and ends_with_block(node.str):
+            # The commands of a user command or autocommand in a block use Vim9
+            # syntax: {cmd} ... }
+            block = Node(NODE_BLOCK)
+            block.pos = self.ea.cmdpos
+            block.ea = self.ea
+            block.body = []
+            block.endblock = NIL
+            node.block = block
+            self.push_context(block)
 
     def separate_nextcmd(self):
         if self.ea.cmd.name == "vimgrep" or self.ea.cmd.name == "vimgrepadd" or self.ea.cmd.name == "lvimgrep" or self.ea.cmd.name == "lvimgrepadd":
@@ -5169,7 +5192,14 @@ class Compiler:
         self.out(";%s", node.str)
 
     def compile_excmd(self, node):
-        self.out("(excmd \"%s\")", viml_escape(node.str, "\\\""))
+        if not viml_has_key(node, "block"):
+            self.out("(excmd \"%s\")", viml_escape(node.str, "\\\""))
+            return
+        self.out("(excmd \"%s\"", viml_escape(node.str, "\\\""))
+        self.incindent("  ")
+        self.compile_body(node.block.body)
+        self.out(")")
+        self.decindent()
 
     def compile_function(self, node):
         left = self.compile(node.left)

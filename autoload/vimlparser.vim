@@ -313,6 +313,21 @@ function! s:islower(c) abort
   return a:c =~# '^[a-z]$'
 endfunction
 
+" Return TRUE when the text ends in white space and "{".
+function! s:ends_with_block(str) abort
+  let last = ''
+  let prev = ''
+  for c in split(a:str, '\zs')
+    if !s:iswhite(c)
+      let prev = last
+      let last = c
+    elseif last !=# ''
+      let last = ' '
+    endif
+  endfor
+  return last ==# '{' && (prev ==# ' ' || prev ==# '')
+endfunction
+
 function! s:ExArg() abort
   let ea = {}
   let ea.forceit = s:FALSE
@@ -360,7 +375,7 @@ endfunction
 " }
 " TOPLEVEL .body
 " COMMENT .str
-" EXCMD .ea .str
+" EXCMD .ea .str [.block]
 " FUNCTION .ea .body .left .rlist .default_args .attr .endfunction
 " ENDFUNCTION .ea
 " DELFUNCTION .ea .left
@@ -520,7 +535,7 @@ function! s:VimLParser.isvim9() abort
     return self.vim9cmd
   endif
   for node in self.context
-    if node.type ==# s:NODE_DEF || node.type ==# s:NODE_LAMBDA || node.type ==# s:NODE_CLASS || node.type ==# s:NODE_INTERFACE || node.type ==# s:NODE_ENUM
+    if node.type ==# s:NODE_DEF || node.type ==# s:NODE_LAMBDA || node.type ==# s:NODE_BLOCK || node.type ==# s:NODE_CLASS || node.type ==# s:NODE_INTERFACE || node.type ==# s:NODE_ENUM
       return s:TRUE
     elseif node.type ==# s:NODE_FUNCTION
       return s:FALSE
@@ -1577,6 +1592,17 @@ function! s:VimLParser.parse_cmd_common() abort
   let node.ea = self.ea
   let node.str = self.reader.getstr(self.ea.linepos, end)
   call self.add_node(node)
+  if (self.ea.cmd.name ==# 'command' || self.ea.cmd.name ==# 'autocmd') && s:ends_with_block(node.str)
+    " The commands of a user command or autocommand in a block use Vim9
+    " syntax: {cmd} ... }
+    let block = s:Node(s:NODE_BLOCK)
+    let block.pos = self.ea.cmdpos
+    let block.ea = self.ea
+    let block.body = []
+    let block.endblock = s:NIL
+    let node.block = block
+    call self.push_context(block)
+  endif
 endfunction
 
 function! s:VimLParser.separate_nextcmd() abort
@@ -6920,7 +6946,15 @@ function! s:Compiler.compile_comment(node) abort
 endfunction
 
 function! s:Compiler.compile_excmd(node) abort
-  call self.out('(excmd "%s")', escape(a:node.str, '\"'))
+  if !has_key(a:node, 'block')
+    call self.out('(excmd "%s")', escape(a:node.str, '\"'))
+    return
+  endif
+  call self.out('(excmd "%s"', escape(a:node.str, '\"'))
+  call self.incindent('  ')
+  call self.compile_body(a:node.block.body)
+  call self.out(')')
+  call self.decindent()
 endfunction
 
 function! s:Compiler.compile_function(node) abort

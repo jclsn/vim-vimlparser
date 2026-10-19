@@ -490,6 +490,24 @@ function islower(c) {
     return viml_eqregh(c, "^[a-z]$");
 }
 
+// Return TRUE when the text ends in white space and "{".
+function ends_with_block(str) {
+    var last = "";
+    var prev = "";
+    var __c3 = viml_split(str, "\\zs");
+    for (var __i3 = 0; __i3 < __c3.length; ++__i3) {
+        var c = __c3[__i3];
+        if (!iswhite(c)) {
+            var prev = last;
+            var last = c;
+        }
+        else if (last != "") {
+            var last = " ";
+        }
+    }
+    return last == "{" && (prev == " " || prev == "");
+}
+
 function ExArg() {
     var ea = {};
     ea.forceit = FALSE;
@@ -537,7 +555,7 @@ function ExArg() {
 // }
 // TOPLEVEL .body
 // COMMENT .str
-// EXCMD .ea .str
+// EXCMD .ea .str [.block]
 // FUNCTION .ea .body .left .rlist .default_args .attr .endfunction
 // ENDFUNCTION .ea
 // DELFUNCTION .ea .left
@@ -690,10 +708,10 @@ VimLParser.prototype.isvim9 = function() {
     if (this.vim9cmd != -1) {
         return this.vim9cmd;
     }
-    var __c3 = this.context;
-    for (var __i3 = 0; __i3 < __c3.length; ++__i3) {
-        var node = __c3[__i3];
-        if (node.type == NODE_DEF || node.type == NODE_LAMBDA || node.type == NODE_CLASS || node.type == NODE_INTERFACE || node.type == NODE_ENUM) {
+    var __c4 = this.context;
+    for (var __i4 = 0; __i4 < __c4.length; ++__i4) {
+        var node = __c4[__i4];
+        if (node.type == NODE_DEF || node.type == NODE_LAMBDA || node.type == NODE_BLOCK || node.type == NODE_CLASS || node.type == NODE_INTERFACE || node.type == NODE_ENUM) {
             return TRUE;
         }
         else if (node.type == NODE_FUNCTION) {
@@ -719,9 +737,9 @@ VimLParser.prototype.pop_context = function() {
 
 VimLParser.prototype.find_context = function(type) {
     var i = 0;
-    var __c4 = this.context;
-    for (var __i4 = 0; __i4 < __c4.length; ++__i4) {
-        var node = __c4[__i4];
+    var __c5 = this.context;
+    for (var __i5 = 0; __i5 < __c5.length; ++__i5) {
+        var node = __c5[__i5];
         if (node.type == type) {
             return i;
         }
@@ -1394,9 +1412,9 @@ VimLParser.prototype.parse_command = function() {
     }
     // In legacy script :final is an abbreviation of :finally.
     if (this.ea.cmd.name == "final" && !this.isvim9()) {
-        var __c5 = this.builtin_commands;
-        for (var __i5 = 0; __i5 < __c5.length; ++__i5) {
-            var x = __c5[__i5];
+        var __c6 = this.builtin_commands;
+        for (var __i6 = 0; __i6 < __c6.length; ++__i6) {
+            var x = __c6[__i6];
             if (x.name == "finally") {
                 this.ea.cmd = x;
                 break;
@@ -1711,9 +1729,9 @@ VimLParser.prototype.find_command = function() {
         return this.find_command_cache[name];
     }
     var cmd = NIL;
-    var __c6 = this.builtin_commands;
-    for (var __i6 = 0; __i6 < __c6.length; ++__i6) {
-        var x = __c6[__i6];
+    var __c7 = this.builtin_commands;
+    for (var __i7 = 0; __i7 < __c7.length; ++__i7) {
+        var x = __c7[__i7];
         if (viml_stridx(x.name, name) == 0 && viml_len(name) >= x.minlen) {
             delete cmd;
             var cmd = x;
@@ -1721,18 +1739,18 @@ VimLParser.prototype.find_command = function() {
         }
     }
     if (this.neovim) {
-        var __c7 = this.neovim_additional_commands;
-        for (var __i7 = 0; __i7 < __c7.length; ++__i7) {
-            var x = __c7[__i7];
+        var __c8 = this.neovim_additional_commands;
+        for (var __i8 = 0; __i8 < __c8.length; ++__i8) {
+            var x = __c8[__i8];
             if (viml_stridx(x.name, name) == 0 && viml_len(name) >= x.minlen) {
                 delete cmd;
                 var cmd = x;
                 break;
             }
         }
-        var __c8 = this.neovim_removed_commands;
-        for (var __i8 = 0; __i8 < __c8.length; ++__i8) {
-            var x = __c8[__i8];
+        var __c9 = this.neovim_removed_commands;
+        for (var __i9 = 0; __i9 < __c9.length; ++__i9) {
+            var x = __c9[__i9];
             if (viml_stridx(x.name, name) == 0 && viml_len(name) >= x.minlen) {
                 delete cmd;
                 var cmd = NIL;
@@ -1913,6 +1931,17 @@ VimLParser.prototype.parse_cmd_common = function() {
     node.ea = this.ea;
     node.str = this.reader.getstr(this.ea.linepos, end);
     this.add_node(node);
+    if ((this.ea.cmd.name == "command" || this.ea.cmd.name == "autocmd") && ends_with_block(node.str)) {
+        // The commands of a user command or autocommand in a block use Vim9
+        // syntax: {cmd} ... }
+        var block = Node(NODE_BLOCK);
+        block.pos = this.ea.cmdpos;
+        block.ea = this.ea;
+        block.body = [];
+        block.endblock = NIL;
+        node.block = block;
+        this.push_context(block);
+    }
 }
 
 VimLParser.prototype.separate_nextcmd = function() {
@@ -2782,9 +2811,9 @@ VimLParser.prototype.parse_vim9_decl = function(type) {
                 throw Err(viml_printf("E475: Invalid argument: %s", c), this.reader.getpos());
             }
         }
-        var __c9 = node.list;
-        for (var __i9 = 0; __i9 < __c9.length; ++__i9) {
-            var x = __c9[__i9];
+        var __c10 = node.list;
+        for (var __i10 = 0; __i10 < __c10.length; ++__i10) {
+            var x = __c10[__i10];
             this.declare(x);
         }
         this.declare(node.rest);
@@ -3283,9 +3312,9 @@ VimLParser.prototype.parse_cmd_for = function() {
     node.rest = lhs.rest;
     this.declare(node.left);
     if (node.list !== NIL) {
-        var __c10 = node.list;
-        for (var __i10 = 0; __i10 < __c10.length; ++__i10) {
-            var x = __c10[__i10];
+        var __c11 = node.list;
+        for (var __i11 = 0; __i11 < __c11.length; ++__i11) {
+            var x = __c11[__i11];
             this.declare(x);
         }
     }
@@ -5741,9 +5770,9 @@ StringReader.prototype.__init__ = function(lines) {
     var offset = 0;
     while (lnum < viml_len(lines)) {
         var col = 0;
-        var __c11 = viml_split(lines[lnum], "\\zs");
-        for (var __i11 = 0; __i11 < __c11.length; ++__i11) {
-            var c = __c11[__i11];
+        var __c12 = viml_split(lines[lnum], "\\zs");
+        for (var __i12 = 0; __i12 < __c12.length; ++__i12) {
+            var c = __c12[__i12];
             viml_add(this.buf, c);
             viml_add(this.pos, [lnum + 1, col + 1, offset]);
             col += viml_len(c);
@@ -5752,9 +5781,9 @@ StringReader.prototype.__init__ = function(lines) {
         while (lnum + 1 < viml_len(lines) && viml_eqregh(lines[lnum + 1], "^\\s*\\\\")) {
             var skip = TRUE;
             var col = 0;
-            var __c12 = viml_split(lines[lnum + 1], "\\zs");
-            for (var __i12 = 0; __i12 < __c12.length; ++__i12) {
-                var c = __c12[__i12];
+            var __c13 = viml_split(lines[lnum + 1], "\\zs");
+            for (var __i13 = 0; __i13 < __c13.length; ++__i13) {
+                var c = __c13[__i13];
                 if (skip) {
                     if (c == "\\") {
                         var skip = FALSE;
@@ -5856,9 +5885,9 @@ StringReader.prototype.readline = function() {
 
 StringReader.prototype.getstr = function(begin, end) {
     var r = "";
-    var __c13 = viml_range(begin.i, end.i - 1);
-    for (var __i13 = 0; __i13 < __c13.length; ++__i13) {
-        var i = __c13[__i13];
+    var __c14 = viml_range(begin.i, end.i - 1);
+    for (var __i14 = 0; __i14 < __c14.length; ++__i14) {
+        var i = __c14[__i14];
         if (i >= viml_len(this.buf)) {
             break;
         }
@@ -6437,9 +6466,9 @@ Compiler.prototype.compile = function(node) {
 }
 
 Compiler.prototype.compile_body = function(body) {
-    var __c14 = body;
-    for (var __i14 = 0; __i14 < __c14.length; ++__i14) {
-        var node = __c14[__i14];
+    var __c15 = body;
+    for (var __i15 = 0; __i15 < __c15.length; ++__i15) {
+        var node = __c15[__i15];
         this.compile(node);
     }
 }
@@ -6454,7 +6483,15 @@ Compiler.prototype.compile_comment = function(node) {
 }
 
 Compiler.prototype.compile_excmd = function(node) {
-    this.out("(excmd \"%s\")", viml_escape(node.str, "\\\""));
+    if (!viml_has_key(node, "block")) {
+        this.out("(excmd \"%s\")", viml_escape(node.str, "\\\""));
+        return;
+    }
+    this.out("(excmd \"%s\"", viml_escape(node.str, "\\\""));
+    this.incindent("  ");
+    this.compile_body(node.block.body);
+    this.out(")");
+    this.decindent();
 }
 
 Compiler.prototype.compile_function = function(node) {
@@ -6467,9 +6504,9 @@ Compiler.prototype.compile_function = function(node) {
             viml_remove(rlist, -1);
             var remaining = TRUE;
         }
-        var __c15 = viml_range(viml_len(rlist));
-        for (var __i15 = 0; __i15 < __c15.length; ++__i15) {
-            var i = __c15[__i15];
+        var __c16 = viml_range(viml_len(rlist));
+        for (var __i16 = 0; __i16 < __c16.length; ++__i16) {
+            var i = __c16[__i16];
             if (i < viml_len(rlist) - viml_len(default_args)) {
                 left += viml_printf(" %s", rlist[i]);
             }
@@ -6588,9 +6625,9 @@ Compiler.prototype.compile_if = function(node) {
     this.incindent("  ");
     this.compile_body(node.body);
     this.decindent();
-    var __c16 = node.elseif;
-    for (var __i16 = 0; __i16 < __c16.length; ++__i16) {
-        var enode = __c16[__i16];
+    var __c17 = node.elseif;
+    for (var __i17 = 0; __i17 < __c17.length; ++__i17) {
+        var enode = __c17[__i17];
         this.out(" elseif %s", this.compile(enode.cond));
         this.incindent("  ");
         this.compile_body(enode.body);
@@ -6647,9 +6684,9 @@ Compiler.prototype.compile_try = function(node) {
     this.out("(try");
     this.incindent("  ");
     this.compile_body(node.body);
-    var __c17 = node.catch;
-    for (var __i17 = 0; __i17 < __c17.length; ++__i17) {
-        var cnode = __c17[__i17];
+    var __c18 = node.catch;
+    for (var __i18 = 0; __i18 < __c18.length; ++__i18) {
+        var cnode = __c18[__i18];
         if (cnode.pattern !== NIL) {
             this.decindent();
             this.out(" catch /%s/", cnode.pattern);
@@ -6991,9 +7028,9 @@ Compiler.prototype.compile_curlynameexpr = function(node) {
 Compiler.prototype.escape_string = function(str) {
     var m = {"\n":"\\n", "\t":"\\t", "\r":"\\r"};
     var out = "\"";
-    var __c18 = viml_range(viml_len(str));
-    for (var __i18 = 0; __i18 < __c18.length; ++__i18) {
-        var i = __c18[__i18];
+    var __c19 = viml_range(viml_len(str));
+    for (var __i19 = 0; __i19 < __c19.length; ++__i19) {
+        var i = __c19[__i19];
         var c = str[i];
         if (viml_has_key(m, c)) {
             out += m[c];
@@ -7015,13 +7052,13 @@ Compiler.prototype.compile_lambda = function(node) {
     var compiler = new Compiler();
     compiler.compile_body(node.body);
     var body = [];
-    var __c19 = compiler.lines;
-    for (var __i19 = 0; __i19 < __c19.length; ++__i19) {
-        var line = __c19[__i19];
+    var __c20 = compiler.lines;
+    for (var __i20 = 0; __i20 < __c20.length; ++__i20) {
+        var line = __c20[__i20];
         var text = "";
-        var __c20 = viml_split(line, "\\zs");
-        for (var __i20 = 0; __i20 < __c20.length; ++__i20) {
-            var c = __c20[__i20];
+        var __c21 = viml_split(line, "\\zs");
+        for (var __i21 = 0; __i21 < __c21.length; ++__i21) {
+            var c = __c21[__i21];
             if (text != "" || c != " ") {
                 text += c;
             }
@@ -7096,9 +7133,9 @@ Compiler.prototype.compile_def = function(node) {
             viml_remove(rlist, -1);
             var remaining = TRUE;
         }
-        var __c21 = viml_range(viml_len(rlist));
-        for (var __i21 = 0; __i21 < __c21.length; ++__i21) {
-            var i = __c21[__i21];
+        var __c22 = viml_range(viml_len(rlist));
+        for (var __i22 = 0; __i22 < __c22.length; ++__i22) {
+            var i = __c22[__i22];
             if (i < viml_len(rlist) - viml_len(default_args)) {
                 left += viml_printf(" %s", rlist[i]);
             }
@@ -7205,9 +7242,9 @@ Compiler.prototype.compile_enum = function(node) {
     }
     this.out("(enum %s", s);
     this.incindent("  ");
-    var __c22 = node.enumvalues;
-    for (var __i22 = 0; __i22 < __c22.length; ++__i22) {
-        var value = __c22[__i22];
+    var __c23 = node.enumvalues;
+    for (var __i23 = 0; __i23 < __c23.length; ++__i23) {
+        var value = __c23[__i23];
         var rlist = value.rlist.map((function(vval) { return this.compile(vval); }).bind(this));
         if (viml_empty(rlist)) {
             this.out("(%s)", value.value);
@@ -7916,9 +7953,9 @@ RegexpParser.prototype.get_token_sq_char_class = function() {
         var r = this.reader.read_alpha();
         if (this.reader.p(0) == ":" && this.reader.p(1) == "]") {
             this.reader.seek_cur(2);
-            var __c23 = class_names;
-            for (var __i23 = 0; __i23 < __c23.length; ++__i23) {
-                var name = __c23[__i23];
+            var __c24 = class_names;
+            for (var __i24 = 0; __i24 < __c24.length; ++__i24) {
+                var name = __c24[__i24];
                 if (r == name) {
                     return "[:" + name + ":]";
                 }
@@ -8051,9 +8088,9 @@ RegexpParser.prototype.getoctchrs = function() {
 
 RegexpParser.prototype.gethexchrs = function(n) {
     var r = "";
-    var __c24 = viml_range(n);
-    for (var __i24 = 0; __i24 < __c24.length; ++__i24) {
-        var i = __c24[__i24];
+    var __c25 = viml_range(n);
+    for (var __i25 = 0; __i25 < __c25.length; ++__i25) {
+        var i = __c25[__i25];
         var c = this.reader.peek();
         if (!isxdigit(c)) {
             break;
