@@ -3136,11 +3136,21 @@ class ExprTokenizer:
             r.skip_white()
             if r.peek() == "#" and r.tell() > 0 and (iswhite(r.p(-1)) or r.p(-1) == "<EOL>"):
                 r.getn(-1)
-            if r.peek() != "<EOL>" or not (force or self.depth > 0 or self.next_line_continues()):
+            if r.peek() != "<EOL>" or not (force or self.depth > 0 or self.next_line_continues()) or self.next_line_is_enddef():
                 r.seek_set(pos)
                 return
             r.get()
             force = TRUE
+
+    # :enddef cannot be used at the start of a continuation line.
+    def next_line_is_enddef(self):
+        r = self.reader
+        pos = r.tell()
+        r.get()
+        r.skip_white()
+        result = r.read_alpha() == "enddef" and not iswordc(r.peekn(1))
+        r.seek_set(pos)
+        return result
 
     # Return TRUE when the next line, ignoring comments and empty lines, starts
     # with an operator that continues the expression.

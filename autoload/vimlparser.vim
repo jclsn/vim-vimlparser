@@ -4630,13 +4630,24 @@ function! s:ExprTokenizer.skip_vim9_newline(force) abort
     if r.peek() ==# '#' && r.tell() > 0 && (s:iswhite(r.p(-1)) || r.p(-1) ==# '<EOL>')
       call r.getn(-1)
     endif
-    if r.peek() !=# '<EOL>' || !(force || self.depth > 0 || self.next_line_continues())
+    if r.peek() !=# '<EOL>' || !(force || self.depth > 0 || self.next_line_continues()) || self.next_line_is_enddef()
       call r.seek_set(pos)
       return
     endif
     call r.get()
     let force = s:TRUE
   endwhile
+endfunction
+
+" :enddef cannot be used at the start of a continuation line.
+function! s:ExprTokenizer.next_line_is_enddef() abort
+  let r = self.reader
+  let pos = r.tell()
+  call r.get()
+  call r.skip_white()
+  let result = r.read_alpha() ==# 'enddef' && !s:iswordc(r.peekn(1))
+  call r.seek_set(pos)
+  return result
 endfunction
 
 " Return TRUE when the next line, ignoring comments and empty lines, starts
