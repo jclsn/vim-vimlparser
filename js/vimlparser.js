@@ -963,13 +963,25 @@ VimLParser.prototype.parse_vim9_statement = function() {
         var result = viml_has_key(this.declared, name) || this.is_vim9_command(pos) == FALSE;
     }
     else if (this.ends_excmds(r.peek())) {
-        // A variable followed by an operator on the next line.
-        var result = viml_has_key(this.declared, name);
+        // A variable followed by an operator on the next line.  A variable alone
+        // has no effect, then it is a command like :new.
+        var result = viml_has_key(this.declared, name) && (this.is_vim9_command(pos) == FALSE || this.vim9_line_continues());
     }
     r.seek_set(pos);
     if (result) {
         this.parse_vim9_assign_or_expr();
     }
+    return result;
+}
+
+// Return TRUE when the next line continues the expression on this line.
+VimLParser.prototype.vim9_line_continues = function() {
+    var pos = this.reader.tell();
+    if (this.reader.peek() == "#") {
+        this.reader.getn(-1);
+    }
+    var result = this.reader.peek() == "<EOL>" && new ExprTokenizer(this.reader, TRUE).next_line_continues();
+    this.reader.seek_set(pos);
     return result;
 }
 

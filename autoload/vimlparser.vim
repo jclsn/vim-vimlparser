@@ -769,13 +769,25 @@ function! s:VimLParser.parse_vim9_statement() abort
     " command.
     let result = has_key(self.declared, name) || self.is_vim9_command(pos) ==# s:FALSE
   elseif self.ends_excmds(r.peek())
-    " A variable followed by an operator on the next line.
-    let result = has_key(self.declared, name)
+    " A variable followed by an operator on the next line.  A variable alone
+    " has no effect, then it is a command like :new.
+    let result = has_key(self.declared, name) && (self.is_vim9_command(pos) ==# s:FALSE || self.vim9_line_continues())
   endif
   call r.seek_set(pos)
   if result
     call self.parse_vim9_assign_or_expr()
   endif
+  return result
+endfunction
+
+" Return TRUE when the next line continues the expression on this line.
+function! s:VimLParser.vim9_line_continues() abort
+  let pos = self.reader.tell()
+  if self.reader.peek() ==# '#'
+    call self.reader.getn(-1)
+  endif
+  let result = self.reader.peek() ==# '<EOL>' && s:ExprTokenizer.new(self.reader, s:TRUE).next_line_continues()
+  call self.reader.seek_set(pos)
   return result
 endfunction
 

@@ -881,11 +881,21 @@ class VimLParser:
             # command.
             result = viml_has_key(self.declared, name) or self.is_vim9_command(pos) == FALSE
         elif self.ends_excmds(r.peek()):
-            # A variable followed by an operator on the next line.
-            result = viml_has_key(self.declared, name)
+            # A variable followed by an operator on the next line.  A variable alone
+            # has no effect, then it is a command like :new.
+            result = viml_has_key(self.declared, name) and (self.is_vim9_command(pos) == FALSE or self.vim9_line_continues())
         r.seek_set(pos)
         if result:
             self.parse_vim9_assign_or_expr()
+        return result
+
+    # Return TRUE when the next line continues the expression on this line.
+    def vim9_line_continues(self):
+        pos = self.reader.tell()
+        if self.reader.peek() == "#":
+            self.reader.getn(-1)
+        result = self.reader.peek() == "<EOL>" and ExprTokenizer(self.reader, TRUE).next_line_continues()
+        self.reader.seek_set(pos)
         return result
 
     # Return TRUE when the text at reader position "pos" is an Ex command that
