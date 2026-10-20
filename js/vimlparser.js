@@ -975,9 +975,9 @@ VimLParser.prototype.parse_vim9_statement = function() {
 
 // Return TRUE when the text at reader position "pos" is an Ex command that
 // exists in Vim9 script.
-VimLParser.prototype.is_vim9_command = function(pos) {
+VimLParser.prototype.is_vim9_command = function(cmdpos) {
     var pos = this.reader.tell();
-    this.reader.seek_set(pos);
+    this.reader.seek_set(cmdpos);
     var cmd = this.find_command();
     this.reader.seek_set(pos);
     if (cmd === NIL) {
@@ -3837,9 +3837,9 @@ ExprTokenizer.prototype.get = function() {
 // In Vim9 script an expression continues on the next line inside brackets,
 // after an operator (a:force), and before an operator that starts the next
 // line.  Comments and empty lines in between are skipped.
-ExprTokenizer.prototype.skip_vim9_newline = function(force) {
+ExprTokenizer.prototype.skip_vim9_newline = function(force_newline) {
     var r = this.reader;
-    var force = force;
+    var force = force_newline;
     while (TRUE) {
         var pos = r.tell();
         r.skip_white();
@@ -5340,9 +5340,9 @@ ExprParser.prototype.parse_interpolation = function(token) {
 //   (args): type => {
 //   ()  (expr1,)  (expr1, expr1, ...)
 //   (expr1)
-ExprParser.prototype.parse_vim9_paren = function(token) {
+ExprParser.prototype.parse_vim9_paren = function(popen) {
     if (this.is_vim9_lambda()) {
-        return this.parse_vim9_lambda(token);
+        return this.parse_vim9_lambda(popen);
     }
     this.tokenizer.depth += 1;
     var token = this.tokenizer.peek();
@@ -5350,7 +5350,7 @@ ExprParser.prototype.parse_vim9_paren = function(token) {
         this.tokenizer.get();
         this.tokenizer.depth -= 1;
         var node = Node(NODE_TUPLE);
-        node.pos = token.pos;
+        node.pos = popen.pos;
         node.value = [];
         return node;
     }
@@ -5358,7 +5358,7 @@ ExprParser.prototype.parse_vim9_paren = function(token) {
     var token = this.tokenizer.get();
     if (token.type == TOKEN_COMMA) {
         var tuple = Node(NODE_TUPLE);
-        tuple.pos = token.pos;
+        tuple.pos = popen.pos;
         tuple.value = [node];
         while (this.tokenizer.peek().type != TOKEN_PCLOSE) {
             viml_add(tuple.value, this.parse_expr1());
@@ -5483,9 +5483,9 @@ ExprParser.prototype.parse_vim9_lambda = function(token) {
 
 // Vim9 dictionary: {key: expr1, "key": expr1, [expr1]: expr1, ...}
 // A key made of word characters and "-" is a literal string.
-ExprParser.prototype.parse_vim9_dict = function(token) {
+ExprParser.prototype.parse_vim9_dict = function(copen) {
     var node = Node(NODE_DICT);
-    node.pos = token.pos;
+    node.pos = copen.pos;
     node.value = [];
     this.tokenizer.depth += 1;
     while (TRUE) {

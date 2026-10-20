@@ -890,9 +890,9 @@ class VimLParser:
 
     # Return TRUE when the text at reader position "pos" is an Ex command that
     # exists in Vim9 script.
-    def is_vim9_command(self, pos):
+    def is_vim9_command(self, cmdpos):
         pos = self.reader.tell()
-        self.reader.seek_set(pos)
+        self.reader.seek_set(cmdpos)
         cmd = self.find_command()
         self.reader.seek_set(pos)
         if cmd is NIL:
@@ -3128,9 +3128,9 @@ class ExprTokenizer:
     # In Vim9 script an expression continues on the next line inside brackets,
     # after an operator (a:force), and before an operator that starts the next
     # line.  Comments and empty lines in between are skipped.
-    def skip_vim9_newline(self, force):
+    def skip_vim9_newline(self, force_newline):
         r = self.reader
-        force = force
+        force = force_newline
         while TRUE:
             pos = r.tell()
             r.skip_white()
@@ -4327,23 +4327,23 @@ class ExprParser:
     #   (args): type => {
     #   ()  (expr1,)  (expr1, expr1, ...)
     #   (expr1)
-    def parse_vim9_paren(self, token):
+    def parse_vim9_paren(self, popen):
         if self.is_vim9_lambda():
-            return self.parse_vim9_lambda(token)
+            return self.parse_vim9_lambda(popen)
         self.tokenizer.depth += 1
         token = self.tokenizer.peek()
         if token.type == TOKEN_PCLOSE:
             self.tokenizer.get()
             self.tokenizer.depth -= 1
             node = Node(NODE_TUPLE)
-            node.pos = token.pos
+            node.pos = popen.pos
             node.value = []
             return node
         node = self.parse_expr1()
         token = self.tokenizer.get()
         if token.type == TOKEN_COMMA:
             tuple = Node(NODE_TUPLE)
-            tuple.pos = token.pos
+            tuple.pos = popen.pos
             tuple.value = [node]
             while self.tokenizer.peek().type != TOKEN_PCLOSE:
                 viml_add(tuple.value, self.parse_expr1())
@@ -4444,9 +4444,9 @@ class ExprParser:
 
     # Vim9 dictionary: {key: expr1, "key": expr1, [expr1]: expr1, ...}
     # A key made of word characters and "-" is a literal string.
-    def parse_vim9_dict(self, token):
+    def parse_vim9_dict(self, copen):
         node = Node(NODE_DICT)
-        node.pos = token.pos
+        node.pos = copen.pos
         node.value = []
         self.tokenizer.depth += 1
         while TRUE:

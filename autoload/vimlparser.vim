@@ -781,9 +781,9 @@ endfunction
 
 " Return TRUE when the text at reader position "pos" is an Ex command that
 " exists in Vim9 script.
-function! s:VimLParser.is_vim9_command(pos) abort
+function! s:VimLParser.is_vim9_command(cmdpos) abort
   let pos = self.reader.tell()
-  call self.reader.seek_set(a:pos)
+  call self.reader.seek_set(a:cmdpos)
   let cmd = self.find_command()
   call self.reader.seek_set(pos)
   if cmd is# s:NIL
@@ -4621,9 +4621,9 @@ endfunction
 " In Vim9 script an expression continues on the next line inside brackets,
 " after an operator (a:force), and before an operator that starts the next
 " line.  Comments and empty lines in between are skipped.
-function! s:ExprTokenizer.skip_vim9_newline(force) abort
+function! s:ExprTokenizer.skip_vim9_newline(force_newline) abort
   let r = self.reader
-  let force = a:force
+  let force = a:force_newline
   while s:TRUE
     let pos = r.tell()
     call r.skip_white()
@@ -5946,9 +5946,9 @@ endfunction
 "   (args): type => {
 "   ()  (expr1,)  (expr1, expr1, ...)
 "   (expr1)
-function! s:ExprParser.parse_vim9_paren(token) abort
+function! s:ExprParser.parse_vim9_paren(popen) abort
   if self.is_vim9_lambda()
-    return self.parse_vim9_lambda(a:token)
+    return self.parse_vim9_lambda(a:popen)
   endif
   let self.tokenizer.depth += 1
   let token = self.tokenizer.peek()
@@ -5956,7 +5956,7 @@ function! s:ExprParser.parse_vim9_paren(token) abort
     call self.tokenizer.get()
     let self.tokenizer.depth -= 1
     let node = s:Node(s:NODE_TUPLE)
-    let node.pos = a:token.pos
+    let node.pos = a:popen.pos
     let node.value = []
     return node
   endif
@@ -5964,7 +5964,7 @@ function! s:ExprParser.parse_vim9_paren(token) abort
   let token = self.tokenizer.get()
   if token.type ==# s:TOKEN_COMMA
     let tuple = s:Node(s:NODE_TUPLE)
-    let tuple.pos = a:token.pos
+    let tuple.pos = a:popen.pos
     let tuple.value = [node]
     while self.tokenizer.peek().type !=# s:TOKEN_PCLOSE
       call add(tuple.value, self.parse_expr1())
@@ -6087,9 +6087,9 @@ endfunction
 
 " Vim9 dictionary: {key: expr1, "key": expr1, [expr1]: expr1, ...}
 " A key made of word characters and "-" is a literal string.
-function! s:ExprParser.parse_vim9_dict(token) abort
+function! s:ExprParser.parse_vim9_dict(copen) abort
   let node = s:Node(s:NODE_DICT)
-  let node.pos = a:token.pos
+  let node.pos = a:copen.pos
   let node.value = []
   let self.tokenizer.depth += 1
   while s:TRUE
