@@ -480,6 +480,11 @@ def islower(c):
     return viml_eqregh(c, "^[a-z]$")
 
 
+# Return TRUE for a command that does not exist in Vim9 script.
+def is_removed_in_vim9(name):
+    return name == "append" or name == "change" or name == "insert" or name == "k" or name == "mode" or name == "open" or name == "t" or name == "xit" or name == "Print"
+
+
 # Return TRUE when the text ends in white space and "{".
 def ends_with_block(str):
     last = ""
@@ -907,8 +912,7 @@ class VimLParser:
         self.reader.seek_set(pos)
         if cmd is NIL:
             return FALSE
-        name = cmd.name
-        return name != "append" and name != "change" and name != "insert" and name != "k" and name != "mode" and name != "open" and name != "t" and name != "xit" and name != "Print"
+        return not is_removed_in_vim9(cmd.name)
 
     # Return the assignment operator at the cursor, or an empty string.
     def peek_assign_op(self):
@@ -1233,6 +1237,9 @@ class VimLParser:
         if self.ea.cmd is NIL:
             self.reader.setpos(self.ea.cmdpos)
             raise VimLParserException(Err(viml_printf("E492: Not an editor command: %s", self.reader.peekline()), self.ea.cmdpos))
+        if self.isvim9() and is_removed_in_vim9(self.ea.cmd.name):
+            self.reader.setpos(self.ea.cmdpos)
+            raise VimLParserException(Err(viml_printf("E1100: Command not supported in Vim9 script (missing :var?): %s", self.reader.peekline()), self.ea.cmdpos))
         # In legacy script :final is an abbreviation of :finally.
         if self.ea.cmd.name == "final" and not self.isvim9():
             for x in self.builtin_commands:

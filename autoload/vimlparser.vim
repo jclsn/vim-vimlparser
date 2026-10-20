@@ -313,6 +313,12 @@ function! s:islower(c) abort
   return a:c =~# '^[a-z]$'
 endfunction
 
+" Return TRUE for a command that does not exist in Vim9 script.
+function! s:is_removed_in_vim9(name) abort
+  return a:name ==# 'append' || a:name ==# 'change' || a:name ==# 'insert' || a:name ==# 'k' || a:name ==# 'mode'
+        \ || a:name ==# 'open' || a:name ==# 't' || a:name ==# 'xit' || a:name ==# 'Print'
+endfunction
+
 " Return TRUE when the text ends in white space and "{".
 function! s:ends_with_block(str) abort
   let last = ''
@@ -801,9 +807,7 @@ function! s:VimLParser.is_vim9_command(cmdpos) abort
   if cmd is# s:NIL
     return s:FALSE
   endif
-  let name = cmd.name
-  return name !=# 'append' && name !=# 'change' && name !=# 'insert' && name !=# 'k' && name !=# 'mode'
-        \ && name !=# 'open' && name !=# 't' && name !=# 'xit' && name !=# 'Print'
+  return !s:is_removed_in_vim9(cmd.name)
 endfunction
 
 " Return the assignment operator at the cursor, or an empty string.
@@ -1166,6 +1170,11 @@ function! s:VimLParser.parse_command() abort
   if self.ea.cmd is# s:NIL
     call self.reader.setpos(self.ea.cmdpos)
     throw s:Err(printf('E492: Not an editor command: %s', self.reader.peekline()), self.ea.cmdpos)
+  endif
+
+  if self.isvim9() && s:is_removed_in_vim9(self.ea.cmd.name)
+    call self.reader.setpos(self.ea.cmdpos)
+    throw s:Err(printf('E1100: Command not supported in Vim9 script (missing :var?): %s', self.reader.peekline()), self.ea.cmdpos)
   endif
 
   " In legacy script :final is an abbreviation of :finally.
